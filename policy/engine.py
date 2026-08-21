@@ -24,7 +24,7 @@ class PolicyInput:
 @dataclass
 class PolicyDecision:
     invoice_id: str
-    decision: str                      # ALLOW | BLOCK | REQUIRE_HUMAN
+    decision: str
     reasons: List[str]
     allowed_actions: List[str]
     blocked_actions: List[str]
@@ -49,46 +49,8 @@ def _detect_content(text: str, keywords: list) -> bool:
 
 
 def evaluate(inp: PolicyInput) -> PolicyDecision:
-    """
-    Evaluation order:
-    1. Financial invariants (pre-conditions, block immediately)
-    2. Content hard-stops (legal, injection, hard_stop flag)
-    3. Dispute detection
-    4. Account sensitivity
-    5. Evidence tier
-    6. Severity / days overdue
-    7. ALLOW if nothing fired
-    """
 
-    # ── 1. Financial invariants ──────────────────────────────────
-    if inp.outstanding_balance_paise < 0:
-        return PolicyDecision(
-            invoice_id=inp.invoice_id,
-            decision="BLOCK",
-            reasons=["outstanding_balance_is_negative"],
-            allowed_actions=[],
-            blocked_actions=["all_actions"]
-        )
-
-    if inp.requested_amount_paise > inp.outstanding_balance_paise:
-        return PolicyDecision(
-            invoice_id=inp.invoice_id,
-            decision="BLOCK",
-            reasons=["requested_amount_exceeds_outstanding_balance"],
-            allowed_actions=[],
-            blocked_actions=["all_actions"]
-        )
-
-    if inp.recommended_action == "create_payment_link" and inp.existing_payment_link:
-        return PolicyDecision(
-            invoice_id=inp.invoice_id,
-            decision="BLOCK",
-            reasons=["active_payment_link_exists_idempotency_protection"],
-            allowed_actions=["resend_existing_link"],
-            blocked_actions=["create_payment_link"]
-        )
-
-    # ── 2. Content hard-stops ────────────────────────────────────
+    # ── 1. Content hard-stops FIRST ──────────────────────────────
     if _detect_content(inp.client_notes, INJECTION_KEYWORDS):
         return PolicyDecision(
             invoice_id=inp.invoice_id,
@@ -116,7 +78,7 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             blocked_actions=["all_automated_actions"]
         )
 
-    # ── 3. Dispute detection ─────────────────────────────────────
+    # ── 2. Dispute detection ─────────────────────────────────────
     if _detect_content(inp.client_notes, DISPUTE_KEYWORDS):
         return PolicyDecision(
             invoice_id=inp.invoice_id,
@@ -127,7 +89,7 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
                            "create_payment_link"]
         )
 
-    # ── 4. Account sensitivity ───────────────────────────────────
+    # ── 3. Account sensitivity ───────────────────────────────────
     if inp.account_value_tier in HUMAN_APPROVAL_TIERS:
         return PolicyDecision(
             invoice_id=inp.invoice_id,
@@ -135,6 +97,34 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             reasons=[f"account_tier_{inp.account_value_tier}_requires_human_approval"],
             allowed_actions=["escalate_to_human", "create_account_manager_review"],
             blocked_actions=["send_reminder", "send_collection_message"]
+        )
+
+    # ── 4. Financial invariants ───────────────────────────────────
+    if inp.outstanding_balance_paise < 0:
+        return PolicyDecision(
+            invoice_id=inp.invoice_id,
+            decision="BLOCK",
+            reasons=["outstanding_balance_is_negative"],
+            allowed_actions=[],
+            blocked_actions=["all_actions"]
+        )
+
+    if inp.requested_amount_paise > inp.outstanding_balance_paise:
+        return PolicyDecision(
+            invoice_id=inp.invoice_id,
+            decision="BLOCK",
+            reasons=["requested_amount_exceeds_outstanding_balance"],
+            allowed_actions=[],
+            blocked_actions=["all_actions"]
+        )
+
+    if inp.recommended_action == "create_payment_link" and inp.existing_payment_link:
+        return PolicyDecision(
+            invoice_id=inp.invoice_id,
+            decision="BLOCK",
+            reasons=["active_payment_link_exists_idempotency_protection"],
+            allowed_actions=["resend_existing_link"],
+            blocked_actions=["create_payment_link"]
         )
 
     # ── 5. Evidence tier ─────────────────────────────────────────
@@ -148,8 +138,6 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
         )
 
     # ── 6. Severity ──────────────────────────────────────────────
-    reasons = []
-
     if inp.days_overdue > DAYS_OVERDUE_HARD_REVIEW:
         return PolicyDecision(
             invoice_id=inp.invoice_id,
@@ -159,6 +147,7 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             blocked_actions=["send_automated_reminder"]
         )
 
+    reasons = []
     if inp.days_overdue > DAYS_OVERDUE_ESCALATION:
         reasons.append("invoice_overdue_beyond_30_days_escalation_level")
 
