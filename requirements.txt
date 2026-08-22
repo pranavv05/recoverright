@@ -1,8 +1,8 @@
-fastapi
-httpx>=0.28
-openai>=1.0
-psycopg[binary]>=3.3
-python-dotenv>=1.2
+fastapi>=0.115,<1.0
+httpx>=0.28,<1.0
+openai>=1.0,<3.0
+psycopg[binary]>=3.3,<4.0
+python-dotenv>=1.2,<2.0
 python-multipart>=0.0.32
 pytest>=9.1
-uvicorn[standard]
+uvicorn[standard]>=0.34,<1.0

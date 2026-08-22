@@ -59,7 +59,10 @@ DEMO_INVOICE = {
 
 
 def rupees(paise: int) -> str:
-    return f"Rs {paise / 100:,.2f}"
+    """Formats integer paise as rupees. Integer arithmetic — paise never becomes a float."""
+    sign = "-" if paise < 0 else ""
+    whole, fraction = divmod(abs(paise), 100)
+    return f"{sign}Rs {whole:,}.{fraction:02d}"
 
 
 def reset_demo():
@@ -163,9 +166,11 @@ def main():
     )
     log_audit_event(INVOICE_ID, "execution", {"execution": execution_result})
 
-    if (execution_result.get("status") == "failed_client_error"
-            and "already exists" in (execution_result.get("error") or "")):
-        print("  Payment link already exists (idempotency working correctly)")
+    if execution_result.get("status") == "duplicate_link_prevented":
+        # Razorpay rejected a second link for this reference_id. That is the
+        # duplicate protection working, not a failure — reuse the existing link.
+        print("  Payment link already exists — Razorpay's reference_id uniqueness")
+        print("  rejected the duplicate create. Reusing the existing link.")
         existing_link = fetch_existing_payment_link(rzp_client, INVOICE_ID)
         execution_result = {
             "status": "link_created",
@@ -195,8 +200,8 @@ def main():
     print("  Pay with Razorpay's test card: 4111 1111 1111 1111 / any future expiry / any CVV")
     try:
         webbrowser.open(execution_result["short_url"])
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  Could not open a browser automatically ({e}) — open the URL above manually.")
 
     print("\nStep 7: Polling reconcile_payment() every 5 seconds for up to 60 seconds...")
     elapsed = 0

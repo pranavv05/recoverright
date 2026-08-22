@@ -1,5 +1,21 @@
+"""Single point for all writes to invoices / audit_log / recoveries.
+
+Consistency model: each function here is one statement in one transaction, so
+every individual write is atomic. The pipeline as a whole is deliberately NOT
+one transaction — its stages are separated by network calls to the LLM and to
+Razorpay, and holding a database transaction open across a 30-second model
+call is worse than the failure it would prevent.
+
+Crash recovery is therefore by replay rather than rollback: `insert_invoice`
+upserts, `insert_recovery` upserts, and `audit_log` is append-only, so
+re-running a batch that died mid-way converges on the correct state. The cost
+is that a crash can leave an invoice with a diagnosis event and no policy
+decision — visible in the trail as a gap, which is the intended behaviour.
+"""
+
 import json
 from datetime import datetime, timezone
+
 from database.connection import get_connection
 
 
@@ -31,9 +47,13 @@ def log_audit_event(invoice_id: str, event_type: str, payload: dict) -> None:
 
 
 def insert_invoice(invoice: dict) -> None:
-    """
-    Inserts the invoice record into the invoices table.
-    Must be called before any audit events for this invoice_id.
+    """Upserts the invoice record. Must run before any audit events for this invoice_id.
+
+    The mutable financial fields are refreshed on conflict. An earlier
+    revision used ON CONFLICT DO NOTHING, which meant that once an invoice was
+    seen, a later partial payment never reached the table: the pipeline
+    reasoned over the fresh figures while the dashboard kept showing the stale
+    ones. Identity and ground-truth columns are left alone.
     """
     outstanding = invoice["amount_paise"] - invoice["partial_payment_received_paise"]
     with get_connection() as conn:
@@ -45,7 +65,14 @@ def insert_invoice(invoice: dict) -> None:
                     days_overdue, account_value_tier, scenario_type, true_cause,
                     client_notes, processed_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (invoice_id) DO NOTHING
+                ON CONFLICT (invoice_id) DO UPDATE SET
+                    client_name = EXCLUDED.client_name,
+                    amount_paise = EXCLUDED.amount_paise,
+                    outstanding_balance_paise = EXCLUDED.outstanding_balance_paise,
+                    days_overdue = EXCLUDED.days_overdue,
+                    account_value_tier = EXCLUDED.account_value_tier,
+                    client_notes = EXCLUDED.client_notes,
+                    processed_at = EXCLUDED.processed_at
                 """,
                 (
                     invoice["invoice_id"],
@@ -98,7 +125,19 @@ def update_recovery(
     amount_recovered_paise: int = None,
     verified_at=None
 ) -> None:
-    """Updates a recovery row's status and, once payment is verified, the recovered amount."""
+    """Updates a recovery row's status and, once payment is verified, the recovered amount.
+
+    `amount_recovered_paise` must be an integer number of paise reported by
+    Razorpay. The type check is here rather than only at the call site because
+    this is the last gate before a money value is written to the database.
+    """
+    if amount_recovered_paise is not None and (
+        not isinstance(amount_recovered_paise, int) or isinstance(amount_recovered_paise, bool)
+    ):
+        raise TypeError(
+            f"amount_recovered_paise for {invoice_id} must be an int, got "
+            f"{type(amount_recovered_paise).__name__} — money is never a float"
+        )
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(

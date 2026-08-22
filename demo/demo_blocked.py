@@ -38,7 +38,10 @@ def load_invoice(invoice_id: str) -> dict:
 
 
 def rupees(paise: int) -> str:
-    return f"Rs {paise / 100:,.2f}"
+    """Formats integer paise as rupees. Integer arithmetic — paise never becomes a float."""
+    sign = "-" if paise < 0 else ""
+    whole, fraction = divmod(abs(paise), 100)
+    return f"{sign}Rs {whole:,}.{fraction:02d}"
 
 
 def main():

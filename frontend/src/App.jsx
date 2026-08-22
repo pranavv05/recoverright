@@ -16,9 +16,17 @@ const DECISION_CLASS = {
   REQUIRE_HUMAN: 'badge-human',
 }
 
+// Paise are integers from the API. Split with integer arithmetic rather than
+// dividing by 100 and formatting, so the rupee figure is never a rounded float.
 function rupees(paise) {
   if (paise === null || paise === undefined) return '—'
-  return `₹${Math.round(paise / 100).toLocaleString('en-IN')}`
+  const negative = paise < 0
+  const abs = Math.abs(paise)
+  const whole = Math.trunc(abs / 100)
+  const fraction = abs % 100
+  const formatted = whole.toLocaleString('en-IN')
+  const withPaise = fraction ? `${formatted}.${String(fraction).padStart(2, '0')}` : formatted
+  return `${negative ? '-₹' : '₹'}${withPaise}`
 }
 
 function lakhs(paise) {
@@ -201,15 +209,30 @@ function PolicyCell({ invoice }) {
   )
 }
 
-function OutcomeCell({ invoice }) {
-  let text = invoice.execution_status || '—'
-  if (invoice.policy_decision === 'REQUIRE_HUMAN') text = 'Escalated'
-  else if (invoice.policy_decision === 'BLOCK') text = 'Blocked'
-  else if (invoice.execution_status) text = invoice.execution_status
-  return <span className="cell-main">{text}</span>
+// The outcome comes from the recorded execution event, not from re-deriving it
+// from the decision — every terminal state now writes one, including BLOCK and
+// REQUIRE_HUMAN, so the cell shows what was logged rather than what we assume.
+const OUTCOME_LABELS = {
+  escalated_to_human: 'Escalated to human',
+  blocked: 'Blocked',
+  simulated: 'Simulated',
+  link_created: 'Payment link created',
+  duplicate_link_prevented: 'Duplicate link prevented',
+  reminder_simulated: 'Reminder simulated',
+  information_gathering_queued: 'Info gathering queued',
+  no_action_within_pattern: 'No action — within pattern',
+  internal_error: 'Internal error',
+  diagnosis_failed: 'Diagnosis failed',
+  skipped: 'Skipped',
 }
 
-function WhyNot({ invoiceId, trail }) {
+function OutcomeCell({ invoice }) {
+  const status = invoice.execution_status
+  if (!status) return <span className="cell-main">—</span>
+  return <span className="cell-main">{OUTCOME_LABELS[status] || status}</span>
+}
+
+function WhyNot({ trail }) {
   const diagnosisEvent = findLastEvent(trail, 'diagnosis')
   const policyEvent = findLastEvent(trail, 'policy_decision')
   const decision = policyEvent?.decision
@@ -253,7 +276,7 @@ function DetailPanel({ invoiceId, invoice, trail, loading, onClose }) {
 
       {!loading && trail && (
         <>
-          <WhyNot invoiceId={invoiceId} trail={trail} />
+          <WhyNot trail={trail} />
 
           <div className="audit-title">AUDIT TRAIL</div>
           <div className="audit-list">
@@ -330,9 +353,12 @@ export default function App() {
     setSelectedId(invoiceId)
     setAuditLoading(true)
     setAuditTrail(null)
+    setError(null)
     try {
-      const res = await api.get(`/api/invoices/${invoiceId}/audit`)
+      const res = await api.get(`/api/invoices/${encodeURIComponent(invoiceId)}/audit`)
       setAuditTrail(res.data)
+    } catch (e) {
+      setError(`Could not load the audit trail for ${invoiceId}: ${e.message}`)
     } finally {
       setAuditLoading(false)
     }
@@ -340,9 +366,12 @@ export default function App() {
 
   const runBatch = async () => {
     setRunningBatch(true)
+    setError(null)
     try {
       await api.post('/api/run-batch')
       await fetchAll()
+    } catch (e) {
+      setError(e.response?.data?.detail || `Batch run failed: ${e.message}`)
     } finally {
       setRunningBatch(false)
     }
@@ -367,7 +396,7 @@ export default function App() {
       {metrics && (
         <div className="counters-row">
           <Counter
-            label="Verified Recovered / Recoverable"
+            label="Verified Recovered / Collectable"
             value={`${lakhs(metrics.verified_recovered_paise)} / ${lakhs(metrics.recoverable_paise)}`}
           />
           <Counter label="Invoices Processed" value={metrics.total_processed} />
@@ -375,9 +404,9 @@ export default function App() {
           <Counter label="Escalated to Human" value={metrics.escalated_to_human_count} />
           <Counter label="Blocked Actions" value={metrics.block_count} />
           <Counter
-            label="Inappropriate Actions"
-            value={metrics.inappropriate_actions_count}
-            tone={metrics.inappropriate_actions_count > 0 ? 'tone-red' : 'tone-green'}
+            label="Allowed Despite Flagged Content"
+            value={metrics.allow_on_flagged_content_count}
+            tone={metrics.allow_on_flagged_content_count > 0 ? 'tone-red' : 'tone-green'}
           />
           <Counter label="API Failures Recovered" value={metrics.api_failures_recovered_count} />
         </div>

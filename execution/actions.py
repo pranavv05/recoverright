@@ -2,7 +2,7 @@ import time
 from datetime import datetime, timezone
 
 from audit.trail import log_audit_event, update_recovery
-from execution.razorpay_client import RateLimitError, ServerError
+from execution.razorpay_client import DuplicateReferenceError, RateLimitError, ServerError
 
 COMPANY_NAME = "Arjun Logistics"
 
@@ -62,6 +62,19 @@ def create_payment_link_with_retry(
             })
             raise
 
+        except DuplicateReferenceError as e:
+            # Razorpay's reference_id uniqueness rejected a second link for
+            # this invoice. That is duplicate protection working, not a
+            # failure — surface it as its own outcome so the caller can reuse
+            # the existing link instead of treating it as a broken request.
+            log_audit_event(invoice_id, "duplicate_link_prevented", {
+                "action": "create_payment_link",
+                "attempt": attempt + 1,
+                "reason": "reference_id_already_exists",
+                "detail": str(e),
+            })
+            raise
+
         except ValueError as e:
             # 4xx (e.g. bad credentials, malformed request) — not transient,
             # retrying won't help. Log and surface immediately, same as 5xx.
@@ -108,6 +121,12 @@ def execute_action(
                 "status": "link_created",
                 "payment_link_id": result.get("id"),
                 "short_url": result.get("short_url"),
+                "amount_paise": outstanding_paise
+            }
+        except DuplicateReferenceError as e:
+            return {
+                "status": "duplicate_link_prevented",
+                "error": str(e),
                 "amount_paise": outstanding_paise
             }
         except MaxRetriesExceeded:
@@ -159,38 +178,100 @@ def execute_action(
 
 
 def reconcile_payment(rzp_client, invoice_id: str, payment_link_id: str) -> dict:
-    """
-    Verifies a Razorpay payment link's status and updates the recoveries table.
-    Recovery is counted ONLY here — never at link creation. If the link isn't
-    paid yet, the recoveries row is left untouched and {"status": "pending"}
-    is returned.
+    """Verifies a Razorpay payment link and updates the recoveries table.
+
+    THIS IS THE ONLY PLACE MONEY IS EVER COUNTED AS RECOVERED. Link creation
+    records `amount_recovered_paise = 0`; nothing else in the codebase writes
+    a non-zero value to that column.
+
+    Every one of these must hold before a rupee is credited:
+      * Razorpay reports the link status as "paid"
+      * the link Razorpay returned is the one we asked about
+      * the link's reference_id is this invoice
+      * amount_paid is a positive integer number of paise
+      * amount_paid does not exceed the amount the link was raised for
+
+    Any failed check records a discrepancy in the audit trail and credits
+    nothing. A partially paid link is reported as partial and not counted —
+    partial settlement of a B2B invoice is a human's call, not the agent's.
     """
     result = rzp_client.verify_payment(payment_link_id)
     razorpay_status = result.get("status")
 
-    if razorpay_status == "paid":
-        amount_recovered_paise = result.get("amount_paid", 0)
-        verified_at = datetime.now(timezone.utc)
-        update_recovery(
-            invoice_id=invoice_id,
-            status="payment_verified",
-            amount_recovered_paise=amount_recovered_paise,
-            verified_at=verified_at
-        )
-        log_audit_event(invoice_id, "payment_verified", {
+    def _pending(reason: str, **extra) -> dict:
+        payload = {
             "action": "reconcile_payment",
             "payment_link_id": payment_link_id,
-            "amount_recovered_paise": amount_recovered_paise
-        })
-        return {
-            "status": "payment_verified",
-            "amount_recovered_paise": amount_recovered_paise,
-            "verified_at": verified_at.isoformat()
+            "razorpay_status": razorpay_status,
+            "reason": reason,
+            **extra,
         }
+        log_audit_event(invoice_id, "reconciliation_pending", payload)
+        return {"status": "pending", "razorpay_status": razorpay_status, "reason": reason}
 
-    log_audit_event(invoice_id, "reconciliation_pending", {
+    if razorpay_status != "paid":
+        return _pending(
+            "partially_paid_requires_human_review"
+            if razorpay_status == "partially_paid" else "link_not_yet_paid"
+        )
+
+    # Identity checks — never credit an invoice against someone else's link.
+    returned_id = result.get("id")
+    if returned_id and returned_id != payment_link_id:
+        log_audit_event(invoice_id, "reconciliation_discrepancy", {
+            "action": "reconcile_payment",
+            "reason": "payment_link_id_mismatch",
+            "requested": payment_link_id,
+            "returned": returned_id,
+        })
+        return {"status": "discrepancy", "reason": "payment_link_id_mismatch"}
+
+    reference_id = result.get("reference_id")
+    if reference_id and reference_id != invoice_id:
+        log_audit_event(invoice_id, "reconciliation_discrepancy", {
+            "action": "reconcile_payment",
+            "reason": "reference_id_mismatch",
+            "expected": invoice_id,
+            "returned": reference_id,
+        })
+        return {"status": "discrepancy", "reason": "reference_id_mismatch"}
+
+    # Amount checks — the credited figure is Razorpay's reported amount_paid,
+    # never the amount we asked for.
+    amount_paid = result.get("amount_paid")
+    if not isinstance(amount_paid, int) or isinstance(amount_paid, bool) or amount_paid <= 0:
+        log_audit_event(invoice_id, "reconciliation_discrepancy", {
+            "action": "reconcile_payment",
+            "reason": "paid_status_without_usable_amount_paid",
+            "amount_paid": amount_paid,
+        })
+        return {"status": "discrepancy", "reason": "paid_status_without_usable_amount_paid"}
+
+    amount_requested = result.get("amount")
+    if isinstance(amount_requested, int) and amount_paid > amount_requested:
+        log_audit_event(invoice_id, "reconciliation_discrepancy", {
+            "action": "reconcile_payment",
+            "reason": "amount_paid_exceeds_link_amount",
+            "amount_paid": amount_paid,
+            "amount_requested": amount_requested,
+        })
+        return {"status": "discrepancy", "reason": "amount_paid_exceeds_link_amount"}
+
+    verified_at = datetime.now(timezone.utc)
+    update_recovery(
+        invoice_id=invoice_id,
+        status="payment_verified",
+        amount_recovered_paise=amount_paid,
+        verified_at=verified_at,
+    )
+    log_audit_event(invoice_id, "payment_verified", {
         "action": "reconcile_payment",
         "payment_link_id": payment_link_id,
-        "razorpay_status": razorpay_status
+        "amount_recovered_paise": amount_paid,
+        "source": "razorpay_reported_amount_paid",
     })
-    return {"status": "pending", "razorpay_status": razorpay_status}
+    return {
+        "status": "payment_verified",
+        "amount_recovered_paise": amount_paid,
+        "verified_at": verified_at.isoformat(),
+    }

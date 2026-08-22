@@ -6,9 +6,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_HOST_AUTH_METHOD: trust
     ports:
-      - "5433:5432"
+      # Bound to loopback only. Publishing on 0.0.0.0 exposed the database to
+      # anything that could reach this host; combined with the
+      # POSTGRES_HOST_AUTH_METHOD=trust that used to be set here, that was an
+      # unauthenticated superuser socket on the network.
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
