@@ -120,6 +120,44 @@ python -m evaluation.run --dataset data/held_out.json
 
 ---
 
+## CSV Upload
+
+Merchants can upload their overdue invoices as CSV directly from Tally, Zoho Books, or Excel. Download the sample CSV to see the expected format.
+
+From the dashboard, use the **Upload Invoice CSV** section above the invoice table: choose a `.csv` file and click **Upload & Process**. Every row is mapped onto the internal invoice schema and run through the exact same diagnose → policy → audit pipeline as the JSON datasets — simulated, so no real Razorpay payment links are created. The invoice table refreshes automatically once processing finishes.
+
+Click **Download Sample CSV** to fetch `data/sample_invoices.csv` and see the expected column layout.
+
+### CSV column specification
+
+**Required columns:**
+
+| Column | Description |
+|---|---|
+| `invoice_id` | Unique invoice identifier |
+| `client_name` | Client / customer name |
+| `amount` | Invoice amount **in rupees** (converted to integer paise internally) |
+| `due_date` | `YYYY-MM-DD` |
+| `days_overdue` | Whole number of days past due |
+
+**Optional columns** (sensible defaults applied when omitted):
+
+| Column | Default |
+|---|---|
+| `client_type` | `"standard"` |
+| `partial_payment` | `0` (rupees) |
+| `payment_link_status` | `"none"` |
+| `payment_link_attempts` | `0` |
+| `reminders_sent` | `0` |
+| `reminders_opened` | `0` |
+| `client_notes` | `""` |
+| `account_value_tier` | `"standard"` |
+| `payment_history` | `[]` (comma-separated values within the cell, e.g. `"paid_on_time,paid_late"`) |
+
+If required columns are missing, the upload is rejected with a message listing exactly which ones. A row with an unparseable `amount` rejects the whole upload with the offending row number. A duplicate `invoice_id` within the same file is skipped with a warning rather than failing the upload.
+
+---
+
 ## Dataset
 
 The dataset is a first-class artifact — not merely seed data. It contains **93 deliberately messy B2B invoices** spanning 19 scenario types, each engineered to test a specific agent behavior, each hand-labelled with ground truth.
@@ -268,6 +306,7 @@ recoverright/
     seen.json            # 52 invoices — used during development
     held_out.json        # 38 invoices — evaluation only, never touched during dev
     all_invoices.json    # Full 90-record reference set
+    sample_invoices.csv  # Sample CSV for the merchant upload feature
   diagnosis/
     diagnoser.py         # LLM diagnosis — evidence-tiered, structured JSON
     prompts.py           # System prompt + user message template

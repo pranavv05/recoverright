@@ -1,0 +1,6 @@
+invoice_id,client_name,amount,due_date,days_overdue,client_type,partial_payment,payment_link_status,payment_link_attempts,reminders_sent,reminders_opened,client_notes,account_value_tier,payment_history
+INV-CSV-001,Bharat Forge Components Pvt Ltd,425000,2026-07-18,35,manufacturer,0,none,0,1,1,"We are disputing this invoice — the amount does not match our signed PO. Please reconcile before we pay.",standard,"paid_on_time,paid_on_time,paid_on_time,paid_late,paid_on_time"
+INV-CSV-002,Anantha Logistics Solutions,168000,2026-08-02,20,logistics_partner,0,expired,2,2,2,"Tried paying via the link you sent but it says the link has expired. Please resend.",standard,"paid_on_time,paid_on_time,paid_on_time,paid_on_time,paid_on_time"
+INV-CSV-003,Konkan Textiles Exports,312000,2026-07-28,25,textile_exporter,0,none,0,1,1,"Payment usually takes a few extra days on our end.",standard,"paid_late,paid_late,paid_late,paid_late,paid_late,paid_late"
+INV-CSV-004,Suvidha Retail Ventures,96000,2026-07-13,40,retailer,0,none,0,0,0,,standard,
+INV-CSV-005,Himalayan Foods Distribution,154000,2026-08-07,15,fmcg_distributor,0,none,0,1,1,"Apologies, this completely slipped through the cracks on our end — will clear it by end of week.",standard,"paid_on_time,paid_on_time,paid_on_time,paid_on_time,paid_on_time,paid_late"

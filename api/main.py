@@ -1,11 +1,14 @@
+import csv
+import io
 import json
 import os
 import sys
 import time
 import webbrowser
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -180,6 +183,132 @@ def run_batch(dataset_path: str, limit: int = None, rzp_client=None) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# CSV upload — lets merchants bring invoices from Tally / Zoho Books / Excel
+# without any integration work. Maps CSV rows onto the same invoice schema
+# JSON datasets use, then runs them through the exact same pipeline.
+# ─────────────────────────────────────────────────────────────────────────
+
+REQUIRED_CSV_COLUMNS = ["invoice_id", "client_name", "amount", "due_date", "days_overdue"]
+SAMPLE_CSV_PATH = "data/sample_invoices.csv"
+
+
+def _rupees_to_paise(raw: str, field_name: str, row_num: int) -> int:
+    """Parses a rupee amount string and converts it to integer paise."""
+    raw = (raw or "").strip().replace(",", "")
+    if raw == "":
+        return 0
+    try:
+        rupees = float(raw)
+    except ValueError:
+        raise ValueError(f"{field_name} in row {row_num} must be a number")
+    return int(round(rupees * 100))
+
+
+def _optional_int(raw: str, field_name: str, row_num: int, default: int = 0) -> int:
+    """Parses an optional integer CSV field, falling back to `default` when blank."""
+    raw = (raw or "").strip()
+    if raw == "":
+        return default
+    try:
+        return int(float(raw))
+    except ValueError:
+        raise ValueError(f"{field_name} in row {row_num} must be a whole number")
+
+
+def _csv_row_to_invoice(row: dict, row_num: int) -> dict:
+    """Maps one CSV row (already known to have the required columns) onto the internal invoice schema."""
+    invoice_id = (row.get("invoice_id") or "").strip()
+    if not invoice_id:
+        raise ValueError(f"invoice_id is required in row {row_num}")
+
+    client_name = (row.get("client_name") or "").strip()
+    if not client_name:
+        raise ValueError(f"client_name is required in row {row_num}")
+
+    due_date = (row.get("due_date") or "").strip()
+    if not due_date:
+        raise ValueError(f"due_date is required in row {row_num}")
+
+    amount_paise = _rupees_to_paise(row.get("amount"), "amount", row_num)
+    if amount_paise <= 0:
+        raise ValueError(f"amount in row {row_num} must be a number")
+
+    days_overdue = _optional_int(row.get("days_overdue"), "days_overdue", row_num)
+    partial_payment_paise = _rupees_to_paise(row.get("partial_payment"), "partial_payment", row_num)
+
+    payment_history_raw = (row.get("payment_history") or "").strip()
+    payment_history = (
+        [v.strip() for v in payment_history_raw.split(",") if v.strip()]
+        if payment_history_raw else []
+    )
+
+    return {
+        "invoice_id": invoice_id,
+        "client_name": client_name,
+        "client_type": (row.get("client_type") or "").strip() or "standard",
+        "amount_paise": amount_paise,
+        "due_date": due_date,
+        "days_overdue": days_overdue,
+        "partial_payment_received_paise": partial_payment_paise,
+        "payment_link_status": (row.get("payment_link_status") or "").strip() or "none",
+        "payment_link_attempts": _optional_int(row.get("payment_link_attempts"), "payment_link_attempts", row_num),
+        "reminders_sent": _optional_int(row.get("reminders_sent"), "reminders_sent", row_num),
+        "reminders_opened": _optional_int(row.get("reminders_opened"), "reminders_opened", row_num),
+        "client_notes": (row.get("client_notes") or "").strip(),
+        "client_payment_history": payment_history,
+        "account_value_tier": (row.get("account_value_tier") or "").strip() or "standard",
+        "scenario_type": "csv_upload",
+        "true_cause": "unknown",
+        "hard_stop": False,
+    }
+
+
+def parse_csv_upload(raw_bytes: bytes) -> tuple:
+    """Parses uploaded CSV bytes into pipeline-ready invoice dicts.
+
+    Returns (invoices, warnings). Raises ValueError with a merchant-facing
+    message on missing required columns or an unrecoverable per-row error.
+    """
+    try:
+        text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise ValueError("CSV file must be UTF-8 encoded")
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValueError("CSV file is empty")
+
+    fieldnames = [f.strip() for f in reader.fieldnames]
+    missing = [c for c in REQUIRED_CSV_COLUMNS if c not in fieldnames]
+    if missing:
+        raise ValueError(
+            "CSV must include: " + ", ".join(REQUIRED_CSV_COLUMNS) +
+            ". Missing: " + ", ".join(missing)
+        )
+
+    invoices = []
+    warnings = []
+    seen_ids = set()
+
+    for row_num, raw_row in enumerate(reader, start=2):  # header is row 1
+        row = {
+            (k.strip() if k else k): (v.strip() if isinstance(v, str) else v)
+            for k, v in raw_row.items()
+        }
+        invoice_id = row.get("invoice_id") or ""
+
+        if invoice_id and invoice_id in seen_ids:
+            warnings.append(f"Duplicate invoice_id '{invoice_id}' in row {row_num} — skipped")
+            continue
+
+        invoice = _csv_row_to_invoice(row, row_num)
+        seen_ids.add(invoice["invoice_id"])
+        invoices.append(invoice)
+
+    return invoices, warnings
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # FastAPI dashboard API — reads the same tables run_batch() writes to.
 # Run with: uvicorn api.main:app --reload --port 8000
 # ─────────────────────────────────────────────────────────────────────────
@@ -346,6 +475,57 @@ def api_run_batch():
         "allow": sum(1 for r in results if r.get("policy_decision") == "ALLOW"),
         "block": sum(1 for r in results if r.get("policy_decision") == "BLOCK"),
         "require_human": sum(1 for r in results if r.get("policy_decision") == "REQUIRE_HUMAN"),
+    }
+
+
+@app.get("/api/sample-csv")
+def api_sample_csv():
+    """Downloads the sample invoice CSV so merchants can see the expected upload format."""
+    if not os.path.exists(SAMPLE_CSV_PATH):
+        raise HTTPException(status_code=404, detail="Sample CSV not found")
+    return FileResponse(
+        SAMPLE_CSV_PATH,
+        media_type="text/csv",
+        filename="sample_invoices.csv"
+    )
+
+
+@app.post("/api/upload-csv")
+async def api_upload_csv(file: UploadFile = File(...)):
+    """
+    Accepts a merchant's invoice CSV (Tally / Zoho Books / Excel export), maps
+    it onto the internal invoice schema, and runs every row through the exact
+    same diagnose → policy → audit pipeline as JSON datasets. Always simulated
+    (no real Razorpay calls) — uploads never create live payment links.
+    """
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+
+    raw_bytes = await file.read()
+
+    try:
+        invoices, warnings = parse_csv_upload(raw_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not invoices:
+        raise HTTPException(status_code=400, detail="No valid invoice rows found in CSV")
+
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    if not api_key or api_key == "your_nvidia_api_key_here":
+        raise HTTPException(status_code=500, detail="NVIDIA_API_KEY not configured on server")
+
+    results = []
+    for invoice in invoices:
+        result = process_invoice(invoice, api_key, rzp_client=None)
+        results.append(result)
+
+    return {
+        "processed": len(results),
+        "allow": sum(1 for r in results if r.get("policy_decision") == "ALLOW"),
+        "block": sum(1 for r in results if r.get("policy_decision") == "BLOCK"),
+        "require_human": sum(1 for r in results if r.get("policy_decision") == "REQUIRE_HUMAN"),
+        "warnings": warnings,
     }
 
 

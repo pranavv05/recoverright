@@ -40,6 +40,106 @@ function findLastEvent(trail, eventType) {
   return null
 }
 
+function CsvUpload({ onUploaded }) {
+  const [file, setFile] = useState(null)
+  const [uploading, setUploading] = useState(false)
+  const [error, setError] = useState(null)
+  const [result, setResult] = useState(null)
+  const [rowCount, setRowCount] = useState(null)
+
+  const handleFileChange = (e) => {
+    const picked = e.target.files?.[0] || null
+    setError(null)
+    setResult(null)
+    if (picked && !picked.name.toLowerCase().endsWith('.csv')) {
+      setFile(null)
+      setError('Please upload a CSV file')
+      return
+    }
+    setFile(picked)
+  }
+
+  const handleUpload = async () => {
+    if (!file) {
+      setError('Please choose a CSV file first')
+      return
+    }
+    setError(null)
+    setResult(null)
+
+    try {
+      const text = await file.text()
+      const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0)
+      setRowCount(Math.max(lines.length - 1, 0))
+    } catch {
+      setRowCount(null)
+    }
+
+    setUploading(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const res = await api.post('/api/upload-csv', formData)
+      setResult(res.data)
+      await onUploaded()
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const downloadSample = () => {
+    window.location.href = `${api.defaults.baseURL}/api/sample-csv`
+  }
+
+  return (
+    <div className="csv-upload">
+      <div className="csv-upload-head">
+        <div className="csv-upload-title">Upload Invoice CSV</div>
+        <div className="csv-upload-sub">
+          Export overdue invoices from Tally, Zoho Books, or Excel and upload the CSV directly.
+        </div>
+      </div>
+      <div className="csv-upload-controls">
+        <input
+          type="file"
+          accept=".csv"
+          onChange={handleFileChange}
+          disabled={uploading}
+          className="csv-file-input"
+        />
+        <button className="csv-upload-btn" onClick={handleUpload} disabled={uploading || !file}>
+          {uploading ? 'Processing…' : 'Upload & Process'}
+        </button>
+        <button className="csv-sample-btn" onClick={downloadSample} disabled={uploading}>
+          Download Sample CSV
+        </button>
+      </div>
+
+      {uploading && (
+        <div className="csv-processing">
+          Processing {rowCount !== null ? `${rowCount} invoices` : 'invoices'}…
+        </div>
+      )}
+
+      {error && <div className="csv-error">{error}</div>}
+
+      {result && !uploading && (
+        <div className="csv-result">
+          <span><strong>{result.processed}</strong> processed</span>
+          <span className="csv-result-allow"><strong>{result.allow}</strong> ALLOW</span>
+          <span className="csv-result-block"><strong>{result.block}</strong> BLOCK</span>
+          <span className="csv-result-human"><strong>{result.require_human}</strong> REQUIRE_HUMAN</span>
+          {result.warnings?.length > 0 && (
+            <span className="csv-result-warnings">{result.warnings.length} warning(s): {result.warnings.join('; ')}</span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Counter({ label, value, tone }) {
   return (
     <div className={`counter ${tone || ''}`}>
@@ -272,6 +372,8 @@ export default function App() {
           <Counter label="API Failures Recovered" value={metrics.api_failures_recovered_count} />
         </div>
       )}
+
+      <CsvUpload onUploaded={fetchAll} />
 
       <div className="main-row">
         <div className="table-wrap">
