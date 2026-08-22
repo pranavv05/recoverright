@@ -60,6 +60,68 @@ def insert_invoice(invoice: dict) -> None:
             )
 
 
+def insert_recovery(
+    invoice_id: str,
+    payment_link_id: str,
+    payment_link_url: str,
+    amount_requested_paise: int,
+    status: str = "link_created"
+) -> None:
+    """
+    Records that a payment link was created for an invoice. Recovery is NOT
+    counted here — amount_recovered_paise stays 0 until update_recovery()
+    marks the payment as verified.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO recoveries (
+                    invoice_id, payment_link_id, payment_link_url,
+                    status, amount_requested_paise, amount_recovered_paise
+                ) VALUES (%s, %s, %s, %s, %s, 0)
+                ON CONFLICT (invoice_id) DO UPDATE SET
+                    payment_link_id = EXCLUDED.payment_link_id,
+                    payment_link_url = EXCLUDED.payment_link_url,
+                    status = EXCLUDED.status,
+                    amount_requested_paise = EXCLUDED.amount_requested_paise
+                """,
+                (invoice_id, payment_link_id, payment_link_url, status, amount_requested_paise)
+            )
+
+
+def update_recovery(
+    invoice_id: str,
+    status: str,
+    amount_recovered_paise: int = None,
+    verified_at=None
+) -> None:
+    """Updates a recovery row's status and, once payment is verified, the recovered amount."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE recoveries
+                SET status = %s,
+                    amount_recovered_paise = COALESCE(%s, amount_recovered_paise),
+                    verified_at = COALESCE(%s, verified_at)
+                WHERE invoice_id = %s
+                """,
+                (status, amount_recovered_paise, verified_at, invoice_id)
+            )
+
+
+def get_recovery(invoice_id: str) -> dict:
+    """Returns the recoveries row for an invoice, or None if no payment link has been created yet."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM recoveries WHERE invoice_id = %s",
+                (invoice_id,)
+            )
+            return cur.fetchone()
+
+
 def get_audit_trail(invoice_id: str) -> list:
     """
     Returns the full audit trail for a given invoice — every event in order.

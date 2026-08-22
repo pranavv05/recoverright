@@ -1,16 +1,60 @@
 import json
 import os
 import sys
+import time
+import webbrowser
 from dotenv import load_dotenv
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
-from audit.trail import insert_invoice, log_audit_event
+from audit.trail import insert_invoice, insert_recovery, log_audit_event
 from policy.engine import PolicyInput, evaluate
 from diagnosis.diagnoser import diagnose
-from execution.actions import execute_action
+from execution.actions import execute_action, reconcile_payment
+from execution.razorpay_client import RazorpayClient
 
 load_dotenv()
+
+
+def build_rzp_client():
+    """Instantiates a RazorpayClient from env vars, or None if credentials aren't set."""
+    key_id = os.environ.get("RAZORPAY_KEY_ID")
+    key_secret = os.environ.get("RAZORPAY_KEY_SECRET")
+    if not key_id or not key_secret:
+        return None
+    return RazorpayClient(key_id=key_id, key_secret=key_secret)
+
+
+def simulate_test_payment(
+    rzp_client,
+    invoice_id: str,
+    payment_link_id: str,
+    short_url: str,
+    poll_seconds: int = 30,
+    poll_interval: int = 5
+) -> dict:
+    """
+    Razorpay's Payment Links product requires payment collection to go through
+    its own hosted Checkout (PCI-DSS) — there is no server-side API to submit
+    a card and complete a payment. This opens the real test-mode link in a
+    browser (pay with Razorpay's published test card 4111 1111 1111 1111, any
+    future expiry, any CVV) and polls reconcile_payment() until the payment
+    link reports "paid" or the timeout elapses.
+    """
+    print(f"      Opening {short_url}")
+    print("      Pay with Razorpay's test card: 4111 1111 1111 1111 / any future expiry / any CVV")
+    try:
+        webbrowser.open(short_url)
+    except Exception:
+        pass
+
+    elapsed = 0
+    while True:
+        result = reconcile_payment(rzp_client, invoice_id, payment_link_id)
+        if result["status"] == "payment_verified" or elapsed >= poll_seconds:
+            return result
+        time.sleep(poll_interval)
+        elapsed += poll_interval
 
 
 def load_dataset(path: str) -> list:
@@ -80,6 +124,19 @@ def process_invoice(invoice: dict, api_key: str, rzp_client=None) -> dict:
                     outstanding_paise=outstanding,
                     rzp_client=rzp_client
                 )
+                if execution_result.get("status") == "link_created":
+                    insert_recovery(
+                        invoice_id=invoice_id,
+                        payment_link_id=execution_result["payment_link_id"],
+                        payment_link_url=execution_result["short_url"],
+                        amount_requested_paise=execution_result["amount_paise"],
+                        status="link_created"
+                    )
+                    log_audit_event(invoice_id, "payment_link_created", {
+                        "action": "create_payment_link",
+                        "payment_link_id": execution_result["payment_link_id"],
+                        "short_url": execution_result["short_url"]
+                    })
             except Exception as e:
                 execution_result = {"status": "failed", "error": str(e)}
             log_audit_event(invoice_id, "execution", {"execution": execution_result})
@@ -99,7 +156,7 @@ def process_invoice(invoice: dict, api_key: str, rzp_client=None) -> dict:
     }
 
 
-def run_batch(dataset_path: str, limit: int = None) -> list:
+def run_batch(dataset_path: str, limit: int = None, rzp_client=None) -> list:
     """Processes every invoice in the dataset through the pipeline and returns per-invoice results."""
     api_key = os.environ.get("NVIDIA_API_KEY")
     if not api_key or api_key == "your_nvidia_api_key_here":
@@ -112,7 +169,7 @@ def run_batch(dataset_path: str, limit: int = None) -> list:
     results = []
     for i, invoice in enumerate(invoices):
         print(f"Processing {i+1}/{len(invoices)}: {invoice['invoice_id']} ({invoice['scenario_type']})")
-        result = process_invoice(invoice, api_key)
+        result = process_invoice(invoice, api_key, rzp_client)
         results.append(result)
         print(f"  → {result.get('policy_decision', 'n/a')} | {result.get('diagnosis', {}).get('diagnosed_cause', 'n/a')}")
 
@@ -121,7 +178,8 @@ def run_batch(dataset_path: str, limit: int = None) -> list:
 
 
 if __name__ == "__main__":
-    results = run_batch("data/seen.json", limit=None)
+    rzp_client = build_rzp_client()
+    results = run_batch("data/seen.json", limit=None, rzp_client=rzp_client)
     print(f"\nProcessed {len(results)} invoices")
     allow = sum(1 for r in results if r.get("policy_decision") == "ALLOW")
     block = sum(1 for r in results if r.get("policy_decision") == "BLOCK")

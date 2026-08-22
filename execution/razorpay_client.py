@@ -71,3 +71,32 @@ class RazorpayClient:
             raise ValueError(
                 f"Razorpay response was not valid JSON for {invoice_id}: {e}"
             ) from e
+
+    def verify_payment(self, payment_link_id: str) -> dict:
+        """Fetches a payment link's current status (and amount_paid) for reconciliation."""
+        try:
+            response = httpx.get(
+                f"{self.BASE_URL}/payment_links/{payment_link_id}",
+                headers=self.headers,
+                timeout=15.0
+            )
+        except httpx.RequestError as e:
+            raise ServerError(
+                f"Razorpay verify_payment request failed for {payment_link_id}: {e}"
+            ) from e
+
+        if response.status_code == 429:
+            raise RateLimitError("Razorpay rate limit hit")
+        if response.status_code >= 500:
+            raise ServerError(f"Razorpay server error: {response.status_code}")
+        if response.status_code >= 400:
+            raise ValueError(
+                f"Razorpay API error {response.status_code} for {payment_link_id}: {response.text[:500]}"
+            )
+
+        try:
+            return response.json()
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Razorpay response was not valid JSON for {payment_link_id}: {e}"
+            ) from e

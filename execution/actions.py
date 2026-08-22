@@ -1,6 +1,7 @@
 import time
+from datetime import datetime, timezone
 
-from audit.trail import log_audit_event
+from audit.trail import log_audit_event, update_recovery
 from execution.razorpay_client import RateLimitError, ServerError
 
 COMPANY_NAME = "Arjun Logistics"
@@ -61,6 +62,17 @@ def create_payment_link_with_retry(
             })
             raise
 
+        except ValueError as e:
+            # 4xx (e.g. bad credentials, malformed request) — not transient,
+            # retrying won't help. Log and surface immediately, same as 5xx.
+            log_audit_event(invoice_id, "api_failure", {
+                "action": "create_payment_link",
+                "attempt": attempt + 1,
+                "reason": "client_error_4xx",
+                "error": str(e)
+            })
+            raise
+
     # Exhausted all retries
     log_audit_event(invoice_id, "api_failure_max_retries", {
         "action": "create_payment_link",
@@ -109,6 +121,12 @@ def execute_action(
                 "error": str(e),
                 "amount_paise": outstanding_paise
             }
+        except ValueError as e:
+            return {
+                "status": "failed_client_error",
+                "error": str(e),
+                "amount_paise": outstanding_paise
+            }
 
     elif action == "send_reminder":
         # Simulated in demo — log the intent, don't send real email
@@ -138,3 +156,41 @@ def execute_action(
             "action": action
         })
         return {"status": "unhandled_action", "action": action}
+
+
+def reconcile_payment(rzp_client, invoice_id: str, payment_link_id: str) -> dict:
+    """
+    Verifies a Razorpay payment link's status and updates the recoveries table.
+    Recovery is counted ONLY here — never at link creation. If the link isn't
+    paid yet, the recoveries row is left untouched and {"status": "pending"}
+    is returned.
+    """
+    result = rzp_client.verify_payment(payment_link_id)
+    razorpay_status = result.get("status")
+
+    if razorpay_status == "paid":
+        amount_recovered_paise = result.get("amount_paid", 0)
+        verified_at = datetime.now(timezone.utc)
+        update_recovery(
+            invoice_id=invoice_id,
+            status="payment_verified",
+            amount_recovered_paise=amount_recovered_paise,
+            verified_at=verified_at
+        )
+        log_audit_event(invoice_id, "payment_verified", {
+            "action": "reconcile_payment",
+            "payment_link_id": payment_link_id,
+            "amount_recovered_paise": amount_recovered_paise
+        })
+        return {
+            "status": "payment_verified",
+            "amount_recovered_paise": amount_recovered_paise,
+            "verified_at": verified_at.isoformat()
+        }
+
+    log_audit_event(invoice_id, "reconciliation_pending", {
+        "action": "reconcile_payment",
+        "payment_link_id": payment_link_id,
+        "razorpay_status": razorpay_status
+    })
+    return {"status": "pending", "razorpay_status": razorpay_status}
