@@ -204,9 +204,25 @@
   color: #ffa53d;
 }
 
-.csv-result-warnings {
+.csv-warning-box {
+  margin-top: 12px;
+  font-size: 13px;
   color: #ffcf5c;
+  background: rgba(255, 165, 61, 0.1);
+  border: 1px solid rgba(255, 165, 61, 0.35);
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+
+.csv-warning-box-head {
+  font-weight: 600;
+}
+
+.csv-warning-box-list {
+  margin: 6px 0 0;
+  padding-left: 20px;
   font-size: 12px;
+  color: #e0c179;
 }
 
 /* ── Main layout ─────────────────────────────────────────── */

@@ -131,9 +131,19 @@ function CsvUpload({ onUploaded }) {
           <span className="csv-result-allow"><strong>{result.allow}</strong> ALLOW</span>
           <span className="csv-result-block"><strong>{result.block}</strong> BLOCK</span>
           <span className="csv-result-human"><strong>{result.require_human}</strong> REQUIRE_HUMAN</span>
-          {result.warnings?.length > 0 && (
-            <span className="csv-result-warnings">{result.warnings.length} warning(s): {result.warnings.join('; ')}</span>
-          )}
+        </div>
+      )}
+
+      {result && !uploading && result.warnings?.length > 0 && (
+        <div className="csv-warning-box">
+          <div className="csv-warning-box-head">
+            ⚠ {result.warnings.length} invoice{result.warnings.length === 1 ? '' : 's'} skipped (already processed):
+          </div>
+          <ul className="csv-warning-box-list">
+            {result.warnings.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

@@ -515,8 +515,26 @@ async def api_upload_csv(file: UploadFile = File(...)):
     if not api_key or api_key == "your_nvidia_api_key_here":
         raise HTTPException(status_code=500, detail="NVIDIA_API_KEY not configured on server")
 
-    results = []
+    invoice_ids = [invoice["invoice_id"] for invoice in invoices]
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT invoice_id FROM invoices WHERE invoice_id = ANY(%s)",
+                (invoice_ids,)
+            )
+            existing_ids = {row["invoice_id"] for row in cur.fetchall()}
+
+    new_invoices = []
     for invoice in invoices:
+        if invoice["invoice_id"] in existing_ids:
+            warnings.append(
+                f"invoice_id {invoice['invoice_id']} already exists in database — skipped"
+            )
+        else:
+            new_invoices.append(invoice)
+
+    results = []
+    for invoice in new_invoices:
         result = process_invoice(invoice, api_key, rzp_client=None)
         results.append(result)
 
