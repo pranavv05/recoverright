@@ -3,7 +3,9 @@ from datetime import datetime, timezone
 from typing import List
 from policy.rules import (
     DAYS_OVERDUE_ESCALATION, DAYS_OVERDUE_HARD_REVIEW,
-    HUMAN_APPROVAL_TIERS, WEAK_EVIDENCE_TIERS,
+    MAX_REMINDERS_BEFORE_ESCALATION,
+    HUMAN_APPROVAL_TIERS, HIGH_RISK_DIAGNOSED_CAUSES, HUMAN_ONLY_ACTIONS,
+    WEAK_EVIDENCE_TIERS,
     LEGAL_KEYWORDS, DISPUTE_KEYWORDS, INJECTION_KEYWORDS
 )
 
@@ -20,6 +22,8 @@ class PolicyInput:
     existing_payment_link: bool
     client_notes: str
     hard_stop: bool = False
+    diagnosed_cause: str = "unknown"
+    reminders_sent: int = 0
 
 @dataclass
 class PolicyDecision:
@@ -54,7 +58,8 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
     """Deterministically evaluates a policy input and returns ALLOW / BLOCK / REQUIRE_HUMAN.
 
     Zero LLM dependency. Evaluation order: content hard-stops → dispute →
-    account sensitivity → financial invariants → evidence tier → severity → ALLOW.
+    high-risk diagnosed cause → account sensitivity → financial invariants →
+    evidence tier → severity → ALLOW.
     """
 
     # ── 1. Content hard-stops FIRST ──────────────────────────────
@@ -96,7 +101,22 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
                            "create_payment_link"]
         )
 
-    # ── 3. Account sensitivity ───────────────────────────────────
+    # ── 3. High-risk diagnosed cause ─────────────────────────────
+    # A broken promise or a deliberate stall both imply an automated
+    # approach (a reminder) has already failed by definition — chasing
+    # further without a human is exactly the damage this system exists
+    # to avoid, regardless of what action the LLM proposed.
+    if inp.diagnosed_cause in HIGH_RISK_DIAGNOSED_CAUSES:
+        return PolicyDecision(
+            invoice_id=inp.invoice_id,
+            decision="REQUIRE_HUMAN",
+            reasons=[f"diagnosed_cause_{inp.diagnosed_cause}_requires_human_judgment"],
+            allowed_actions=["escalate_to_human"],
+            blocked_actions=["send_reminder", "send_collection_message",
+                           "create_payment_link"]
+        )
+
+    # ── 4. Account sensitivity ───────────────────────────────────
     if inp.account_value_tier in HUMAN_APPROVAL_TIERS:
         return PolicyDecision(
             invoice_id=inp.invoice_id,
@@ -106,7 +126,7 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             blocked_actions=["send_reminder", "send_collection_message"]
         )
 
-    # ── 4. Financial invariants ───────────────────────────────────
+    # ── 5. Financial invariants ───────────────────────────────────
     if inp.outstanding_balance_paise < 0:
         return PolicyDecision(
             invoice_id=inp.invoice_id,
@@ -134,7 +154,7 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             blocked_actions=["create_payment_link"]
         )
 
-    # ── 5. Evidence tier ─────────────────────────────────────────
+    # ── 6. Evidence tier ─────────────────────────────────────────
     if inp.evidence_tier in WEAK_EVIDENCE_TIERS:
         return PolicyDecision(
             invoice_id=inp.invoice_id,
@@ -144,7 +164,24 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             blocked_actions=["send_collection_message", "escalate_to_collections"]
         )
 
-    # ── 6. Severity ──────────────────────────────────────────────
+    # A "strong_inference" call with zero direct client communication and an
+    # aggressive proposed action is inference stacked on inference — the LLM
+    # cited nothing the client actually said. Require a human sanity check
+    # rather than trusting a confidence label the client never confirmed.
+    if (
+        inp.evidence_tier == "strong_inference"
+        and not inp.client_notes.strip()
+        and inp.recommended_action == "send_reminder"
+    ):
+        return PolicyDecision(
+            invoice_id=inp.invoice_id,
+            decision="REQUIRE_HUMAN",
+            reasons=["unsupported_inference_no_client_communication"],
+            allowed_actions=["gather_information"],
+            blocked_actions=["send_reminder", "send_collection_message"]
+        )
+
+    # ── 7. Severity ──────────────────────────────────────────────
     if inp.days_overdue > DAYS_OVERDUE_HARD_REVIEW:
         return PolicyDecision(
             invoice_id=inp.invoice_id,
@@ -154,11 +191,36 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             blocked_actions=["send_automated_reminder"]
         )
 
+    # Repeated automated contact with no resolution — sending yet another
+    # reminder is not working and needs human judgment, independent of
+    # whatever cause the LLM diagnosed.
+    if inp.reminders_sent >= MAX_REMINDERS_BEFORE_ESCALATION:
+        return PolicyDecision(
+            invoice_id=inp.invoice_id,
+            decision="REQUIRE_HUMAN",
+            reasons=["reminder_fatigue_repeated_contact_unresolved"],
+            allowed_actions=["escalate_to_human"],
+            blocked_actions=["send_reminder"]
+        )
+
+    # A recommended action that is itself a human handoff (escalate_to_human,
+    # flag_for_legal, cancel_duplicate) is never something to "ALLOW" as if
+    # it were autonomous execution — the LLM is already asking for a human,
+    # regardless of what evidence tier or cause got it there.
+    if inp.recommended_action in HUMAN_ONLY_ACTIONS:
+        return PolicyDecision(
+            invoice_id=inp.invoice_id,
+            decision="REQUIRE_HUMAN",
+            reasons=["recommended_action_is_a_human_handoff_not_autonomous"],
+            allowed_actions=[inp.recommended_action],
+            blocked_actions=[]
+        )
+
     reasons = []
     if inp.days_overdue > DAYS_OVERDUE_ESCALATION:
         reasons.append("invoice_overdue_beyond_30_days_escalation_level")
 
-    # ── 7. ALLOW ─────────────────────────────────────────────────
+    # ── 8. ALLOW ─────────────────────────────────────────────────
     return PolicyDecision(
         invoice_id=inp.invoice_id,
         decision="ALLOW",

@@ -13,7 +13,9 @@ def make_input(**overrides):
         requested_amount_paise=1000000,
         existing_payment_link=False,
         client_notes="",
-        hard_stop=False
+        hard_stop=False,
+        diagnosed_cause="known_cause",
+        reminders_sent=1
     )
     defaults.update(overrides)
     return PolicyInput(**defaults)
@@ -108,3 +110,56 @@ def test_same_client_disputed_invoice_blocked_clean_allowed():
     assert evaluate(disputed).decision == "BLOCK"
     assert evaluate(clean).decision == "ALLOW"
     # Proves per-invoice reasoning, not per-client
+
+def test_promise_broken_cause_requires_human():
+    # A broken promise means an automated approach already failed once —
+    # never autonomously chase again, regardless of the LLM's proposed action.
+    inp = make_input(
+        diagnosed_cause="promise_broken",
+        evidence_tier="known",
+        recommended_action="send_reminder",
+        client_notes="Said they'd pay by Friday, date has passed with no payment."
+    )
+    d = evaluate(inp)
+    assert d.decision == "REQUIRE_HUMAN"
+    assert "diagnosed_cause_promise_broken_requires_human_judgment" in d.reasons
+
+def test_deliberate_stall_cause_requires_human():
+    inp = make_input(diagnosed_cause="deliberate_stall", evidence_tier="strong_inference")
+    d = evaluate(inp)
+    assert d.decision == "REQUIRE_HUMAN"
+    assert "diagnosed_cause_deliberate_stall_requires_human_judgment" in d.reasons
+
+def test_reminder_fatigue_requires_human():
+    # 5+ reminders sent with no resolution — repeated automated contact isn't
+    # working, independent of what cause the LLM diagnosed.
+    inp = make_input(reminders_sent=5, days_overdue=47)
+    d = evaluate(inp)
+    assert d.decision == "REQUIRE_HUMAN"
+    assert "reminder_fatigue_repeated_contact_unresolved" in d.reasons
+
+def test_human_handoff_action_is_never_allow():
+    # If the LLM's own recommended_action is escalate_to_human / flag_for_legal
+    # / cancel_duplicate, that is a request for a human, not a self-executing
+    # step — the policy engine must never label it ALLOW.
+    inp = make_input(
+        evidence_tier="strong_inference",
+        diagnosed_cause="chronic_late_payer",
+        recommended_action="escalate_to_human",
+        client_notes=""
+    )
+    d = evaluate(inp)
+    assert d.decision == "REQUIRE_HUMAN"
+    assert "recommended_action_is_a_human_handoff_not_autonomous" in d.reasons
+
+def test_unsupported_inference_no_notes_requires_human():
+    # strong_inference + zero client communication + an aggressive proposed
+    # action is inference stacked on inference — nothing the client actually said.
+    inp = make_input(
+        evidence_tier="strong_inference",
+        client_notes="",
+        recommended_action="send_reminder"
+    )
+    d = evaluate(inp)
+    assert d.decision == "REQUIRE_HUMAN"
+    assert "unsupported_inference_no_client_communication" in d.reasons

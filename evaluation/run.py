@@ -1,7 +1,6 @@
 import argparse
 import json
 import os
-import time
 
 from dotenv import load_dotenv
 
@@ -27,7 +26,6 @@ def run_evaluation(held_out_path: str, api_key: str, rzp_client=None) -> dict:
 
         if result.get("status") in ("skipped", "diagnosis_failed"):
             failed.append({"invoice_id": result["invoice_id"], "status": result["status"]})
-            time.sleep(1.5)
             continue
 
         diagnosis = result["diagnosis"]
@@ -44,7 +42,6 @@ def run_evaluation(held_out_path: str, api_key: str, rzp_client=None) -> dict:
             "policy_decision": result["policy_decision"],
             "policy_reasons": result["policy_reasons"]
         })
-        time.sleep(1.5)   # stay within Groq's per-minute token budget
 
     metrics = compute_metrics(results)
     metrics["excluded_failures"] = failed
@@ -63,9 +60,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    groq_api_key = os.environ.get("GROQ_API_KEY")
-    if not groq_api_key or groq_api_key == "your_groq_key_here":
-        raise ValueError("GROQ_API_KEY not set in .env")
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    if not api_key or api_key == "your_nvidia_api_key_here":
+        raise ValueError("NVIDIA_API_KEY not set in .env")
 
-    final_metrics = run_evaluation(args.dataset, groq_api_key, rzp_client=None)
+    final_metrics = run_evaluation(args.dataset, api_key, rzp_client=None)
     print(json.dumps(final_metrics, indent=2))

@@ -2,8 +2,22 @@
 DAYS_OVERDUE_ESCALATION = 30
 DAYS_OVERDUE_HARD_REVIEW = 60
 
+# Reminders sent with no resolution — repeated automated contact has failed,
+# continuing to auto-remind is not working and needs human judgment.
+MAX_REMINDERS_BEFORE_ESCALATION = 5
+
 # Account tiers requiring human approval
 HUMAN_APPROVAL_TIERS = {"strategic", "high_value"}
+
+# Diagnosed causes that inherently require human handling regardless of the
+# LLM's proposed action: a broken promise or a deliberate stall both imply an
+# automated approach has already failed by definition.
+HIGH_RISK_DIAGNOSED_CAUSES = {"promise_broken", "deliberate_stall"}
+
+# Actions that are themselves a human handoff, not an autonomous step — the
+# LLM asking for escalation, legal review, or invoice cancellation is never
+# something the system should "ALLOW" as if it were self-executing.
+HUMAN_ONLY_ACTIONS = {"escalate_to_human", "flag_for_legal", "cancel_duplicate"}
 
 # Evidence tiers that block aggressive action
 WEAK_EVIDENCE_TIERS = {"unknown"}

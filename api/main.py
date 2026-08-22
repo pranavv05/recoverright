@@ -1,7 +1,6 @@
 import json
 import os
 import sys
-import time
 from dotenv import load_dotenv
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -19,7 +18,7 @@ def load_dataset(path: str) -> list:
     with open(path) as f:
         return json.load(f)
 
-def process_invoice(invoice: dict, groq_api_key: str, rzp_client=None) -> dict:
+def process_invoice(invoice: dict, api_key: str, rzp_client=None) -> dict:
     """Runs one invoice through the full pipeline: insert → diagnose → policy → execute → audit."""
     invoice_id = invoice["invoice_id"]
 
@@ -36,7 +35,7 @@ def process_invoice(invoice: dict, groq_api_key: str, rzp_client=None) -> dict:
 
     # Step 3: Diagnose
     try:
-        diagnosis = diagnose(invoice, groq_api_key)
+        diagnosis = diagnose(invoice, api_key)
     except Exception as e:
         log_audit_event(invoice_id, "diagnosis_failed", {"error": str(e)})
         print(f"  DIAGNOSIS ERROR [{invoice_id}]: {e}")
@@ -56,7 +55,9 @@ def process_invoice(invoice: dict, groq_api_key: str, rzp_client=None) -> dict:
         requested_amount_paise=outstanding,
         existing_payment_link=invoice["payment_link_status"] == "active",
         client_notes=invoice.get("client_notes") or "",
-        hard_stop=invoice.get("hard_stop", False)
+        hard_stop=invoice.get("hard_stop", False),
+        diagnosed_cause=diagnosis.get("diagnosed_cause", "unknown"),
+        reminders_sent=invoice["reminders_sent"]
     )
     decision = evaluate(policy_input)
 
@@ -100,9 +101,9 @@ def process_invoice(invoice: dict, groq_api_key: str, rzp_client=None) -> dict:
 
 def run_batch(dataset_path: str, limit: int = None) -> list:
     """Processes every invoice in the dataset through the pipeline and returns per-invoice results."""
-    groq_api_key = os.environ.get("GROQ_API_KEY")
-    if not groq_api_key or groq_api_key == "your_groq_key_here":
-        raise ValueError("GROQ_API_KEY not set in .env")
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    if not api_key or api_key == "your_nvidia_api_key_here":
+        raise ValueError("NVIDIA_API_KEY not set in .env")
 
     invoices = load_dataset(dataset_path)
     if limit:
@@ -111,10 +112,9 @@ def run_batch(dataset_path: str, limit: int = None) -> list:
     results = []
     for i, invoice in enumerate(invoices):
         print(f"Processing {i+1}/{len(invoices)}: {invoice['invoice_id']} ({invoice['scenario_type']})")
-        result = process_invoice(invoice, groq_api_key)
+        result = process_invoice(invoice, api_key)
         results.append(result)
         print(f"  → {result.get('policy_decision', 'n/a')} | {result.get('diagnosis', {}).get('diagnosed_cause', 'n/a')}")
-        time.sleep(1.5)   # spread requests out to stay within Groq's per-minute token budget
 
     return results
 

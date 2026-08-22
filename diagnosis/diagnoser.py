@@ -1,14 +1,18 @@
 import json
 import time
-import httpx
+
+import openai
 from diagnosis.prompts import DIAGNOSIS_SYSTEM_PROMPT, DIAGNOSIS_USER_TEMPLATE
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "openai/gpt-oss-120b"
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+# meta/llama-3.3-70b-instruct was consistently timing out on NVIDIA's free
+# tier at the time of integration; meta/llama-3.1-8b-instruct responded
+# reliably and fast in repeated live checks.
+NVIDIA_MODEL = "meta/llama-3.1-8b-instruct"
 MAX_RETRIES = 5
 
 def build_user_message(invoice: dict) -> str:
-    """Formats one invoice into the Groq diagnosis user prompt."""
+    """Formats one invoice into the NVIDIA NIM diagnosis user prompt."""
     outstanding = (
         invoice["amount_paise"] - invoice["partial_payment_received_paise"]
     ) // 100
@@ -30,76 +34,58 @@ def build_user_message(invoice: dict) -> str:
     )
 
 def diagnose(invoice: dict, api_key: str) -> dict:
-    """Calls Groq to diagnose why an invoice is unpaid; retries on rate limits and 5xx errors.
+    """Calls NVIDIA NIM to diagnose why an invoice is unpaid; retries on rate limits and 5xx errors.
 
     Returns the parsed diagnosis JSON only — performs no database writes.
     """
     invoice_id = invoice.get("invoice_id", "?")
     user_message = build_user_message(invoice)
+    # max_retries=0: this function already implements its own controlled
+    # backoff loop below — the SDK's own internal retries would compound
+    # with it unpredictably.
+    client = openai.OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key, max_retries=0)
 
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = httpx.post(
-                GROQ_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": GROQ_MODEL,
-                    "messages": [
-                        {"role": "system", "content": DIAGNOSIS_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_message}
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 1000
-                },
+            response = client.chat.completions.create(
+                model=NVIDIA_MODEL,
+                messages=[
+                    {"role": "system", "content": DIAGNOSIS_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message}
+                ],
+                temperature=0.1,
+                max_tokens=1000,
+                response_format={"type": "json_object"},
                 timeout=30.0
             )
-        except httpx.RequestError as e:
-            last_error = f"network error: {e}"
-            print(f"  [{invoice_id}] Groq request failed (attempt {attempt}/{MAX_RETRIES}): {last_error}")
-            time.sleep(2 ** attempt)
-            continue
-
-        # Rate limited — back off and retry, honoring Retry-After if present
-        if response.status_code == 429:
-            retry_after = response.headers.get("retry-after")
-            wait = float(retry_after) if retry_after else 2 ** attempt
-            last_error = f"429 rate limited: {response.text[:300]}"
-            print(f"  [{invoice_id}] Groq rate limited (attempt {attempt}/{MAX_RETRIES}), retrying in {wait}s")
+        except openai.RateLimitError as e:
+            last_error = f"rate limited: {e}"
+            wait = 2 ** attempt
+            print(f"  [{invoice_id}] NVIDIA NIM rate limited (attempt {attempt}/{MAX_RETRIES}), retrying in {wait}s")
             time.sleep(wait)
             continue
-
-        # Transient server errors — retry with exponential backoff
-        if response.status_code >= 500:
-            last_error = f"{response.status_code} server error: {response.text[:300]}"
-            print(f"  [{invoice_id}] Groq server error (attempt {attempt}/{MAX_RETRIES}): {last_error}")
+        except openai.APIConnectionError as e:
+            last_error = f"network error: {e}"
+            print(f"  [{invoice_id}] NVIDIA NIM request failed (attempt {attempt}/{MAX_RETRIES}): {last_error}")
             time.sleep(2 ** attempt)
             continue
-
-        if response.status_code != 200:
+        except openai.APIStatusError as e:
+            if e.status_code >= 500:
+                last_error = f"{e.status_code} server error: {e.message}"
+                print(f"  [{invoice_id}] NVIDIA NIM server error (attempt {attempt}/{MAX_RETRIES}): {last_error}")
+                time.sleep(2 ** attempt)
+                continue
             raise ValueError(
-                f"Groq API error {response.status_code} for {invoice_id}: {response.text[:500]}"
-            )
+                f"NVIDIA NIM API error {e.status_code} for {invoice_id}: {e.message}"
+            ) from e
 
-        try:
-            response_json = response.json()
-        except json.JSONDecodeError as e:
+        choice = response.choices[0]
+        raw = choice.message.content
+
+        if choice.finish_reason == "length":
             raise ValueError(
-                f"Groq response was not valid JSON for {invoice_id}: {e} — body: {response.text[:500]}"
-            )
-
-        if "choices" not in response_json:
-            raise ValueError(f"Groq API error for {invoice_id}: {response_json}")
-
-        choice = response_json["choices"][0]
-        raw = choice["message"]["content"]
-
-        if choice.get("finish_reason") == "length":
-            raise ValueError(
-                f"Groq response for {invoice_id} was truncated (hit max_tokens) — raw content: {raw[:500]}"
+                f"NVIDIA NIM response for {invoice_id} was truncated (hit max_tokens) — raw content: {raw[:500]}"
             )
 
         # Strip markdown fences if present
@@ -116,4 +102,4 @@ def diagnose(invoice: dict, api_key: str) -> dict:
                 f"Failed to parse diagnosis JSON for {invoice_id}: {e} — raw content: {raw[:500]}"
             )
 
-    raise ValueError(f"Groq API failed for {invoice_id} after {MAX_RETRIES} attempts: {last_error}")
+    raise ValueError(f"NVIDIA NIM API failed for {invoice_id} after {MAX_RETRIES} attempts: {last_error}")

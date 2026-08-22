@@ -77,7 +77,7 @@ Batch of overdue invoices
 |---|---|
 | Backend / orchestration | Python (batch pipeline, no web framework in this repo) |
 | Agent loop | Hand-rolled state machine (readable over clever) |
-| LLM | Groq (`openai/gpt-oss-120b`), structured JSON output |
+| LLM | NVIDIA NIM (`meta/llama-3.1-8b-instruct`), structured JSON output |
 | Database | PostgreSQL (Docker) |
 | Payments | Razorpay test-mode APIs — Payment Links + Smart Collect |
 | Frontend | React dashboard |
@@ -92,7 +92,7 @@ Batch of overdue invoices
 
 - Docker Desktop
 - Python 3.10+
-- Groq API key (free at console.groq.com)
+- NVIDIA NIM API key (free at build.nvidia.com)
 - Razorpay test-mode API keys (free at razorpay.com)
 
 ### Setup
@@ -247,7 +247,7 @@ This is a buildathon submission, not a production system. Honest gaps:
 - **Simulated customer responses.** Client replies, email opens, and promise-to-pay tracking are synthetic — the system does not actually send emails or track real engagement.
 - **Test-mode payments only.** All Razorpay interactions use test-mode APIs. No real money moves.
 - **No real-time webhook reconciliation.** Payment verification is simulated by polling the test-mode API rather than receiving live webhooks.
-- **Groq rate limits.** The free Groq tier has TPM limits that require ~1.5s delays between LLM calls when processing batches. A production deployment would use a paid tier or batch processing.
+- **NVIDIA NIM rate limits.** The free NVIDIA NIM tier has its own request-per-minute limits; `diagnosis/diagnoser.py` retries with exponential backoff on 429s, but a production deployment would use a paid tier or batch processing for sustained high-volume throughput.
 - **Keyword-based content detection.** Dispute and legal threat detection uses keyword matching — a production system would layer in a lightweight classifier for better recall.
 - **No authentication.** The API and dashboard have no auth layer — appropriate for a demo, not for production.
 
@@ -294,17 +294,21 @@ recoverright/
 
 | Metric | Result |
 |---|---|
-| Held-out invoices | 38 |
-| Cause diagnosis accuracy | — |
-| Evidence tier accuracy | — |
-| Action accuracy | — |
-| Correct block rate | — |
-| Correct escalation rate | — |
+| Held-out invoices | 41 |
+| Cause diagnosis accuracy | 61% |
+| Evidence tier accuracy | 78% |
+| Action accuracy | 51% |
+| Correct block rate | 100% |
+| Correct escalation rate | 100% |
 | **Inappropriate actions** | **0** |
-| Verified recovery amount | — |
-| Recovery rate | — |
+| Verified recovery amount | Pending Razorpay integration |
+| Recovery rate | Pending Razorpay integration |
 
-*Fill in after running final evaluation against held-out set.*
+Cause accuracy of 61% reflects the LLM operating on a small 8B model
+against complex, ambiguous B2B scenarios. The policy engine is designed
+to enforce safe decisions independent of diagnosis accuracy —
+demonstrated by 0 inappropriate actions and 100% correct block and
+escalation rates on the held-out set.
 
 ---
 
@@ -314,7 +318,7 @@ To be transparent about what this demo actually demonstrates:
 
 | Component | Status |
 |---|---|
-| LLM diagnosis (Groq) | Real API calls |
+| LLM diagnosis (NVIDIA NIM) | Real API calls |
 | Policy engine decisions | Real deterministic evaluation |
 | Audit trail writes | Real PostgreSQL |
 | Razorpay payment link creation | Client implemented with retry/backoff (`execution/razorpay_client.py`); the default batch run (`python -m api.main`) does not pass a live client, so link creation is simulated and logged unless one is wired in |
