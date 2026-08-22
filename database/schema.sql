@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     account_value_tier VARCHAR,
     scenario_type VARCHAR,
     true_cause VARCHAR,
+    client_notes VARCHAR,
     processed_at TIMESTAMPTZ
 );
 

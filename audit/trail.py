@@ -42,8 +42,9 @@ def insert_invoice(invoice: dict) -> None:
                 """
                 INSERT INTO invoices (
                     invoice_id, client_name, amount_paise, outstanding_balance_paise,
-                    days_overdue, account_value_tier, scenario_type, true_cause, processed_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    days_overdue, account_value_tier, scenario_type, true_cause,
+                    client_notes, processed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (invoice_id) DO NOTHING
                 """,
                 (
@@ -55,6 +56,7 @@ def insert_invoice(invoice: dict) -> None:
                     invoice["account_value_tier"],
                     invoice["scenario_type"],
                     invoice["true_cause"],
+                    invoice.get("client_notes") or "",
                     datetime.now(timezone.utc)
                 )
             )
