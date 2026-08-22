@@ -8,6 +8,7 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 MAX_RETRIES = 5
 
 def build_user_message(invoice: dict) -> str:
+    """Formats one invoice into the Groq diagnosis user prompt."""
     outstanding = (
         invoice["amount_paise"] - invoice["partial_payment_received_paise"]
     ) // 100
@@ -29,6 +30,10 @@ def build_user_message(invoice: dict) -> str:
     )
 
 def diagnose(invoice: dict, api_key: str) -> dict:
+    """Calls Groq to diagnose why an invoice is unpaid; retries on rate limits and 5xx errors.
+
+    Returns the parsed diagnosis JSON only — performs no database writes.
+    """
     invoice_id = invoice.get("invoice_id", "?")
     user_message = build_user_message(invoice)
 

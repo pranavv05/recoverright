@@ -10,16 +10,17 @@ from audit.trail import insert_invoice, log_audit_event
 from policy.engine import PolicyInput, evaluate
 from diagnosis.diagnoser import diagnose
 from execution.actions import execute_action
-from database.connection import get_connection
 
 load_dotenv()
 
 
 def load_dataset(path: str) -> list:
+    """Loads a JSON invoice dataset from disk."""
     with open(path) as f:
         return json.load(f)
 
 def process_invoice(invoice: dict, groq_api_key: str, rzp_client=None) -> dict:
+    """Runs one invoice through the full pipeline: insert → diagnose → policy → execute → audit."""
     invoice_id = invoice["invoice_id"]
 
     # Step 1: Insert invoice into DB first
@@ -98,6 +99,7 @@ def process_invoice(invoice: dict, groq_api_key: str, rzp_client=None) -> dict:
 
 
 def run_batch(dataset_path: str, limit: int = None) -> list:
+    """Processes every invoice in the dataset through the pipeline and returns per-invoice results."""
     groq_api_key = os.environ.get("GROQ_API_KEY")
     if not groq_api_key or groq_api_key == "your_groq_key_here":
         raise ValueError("GROQ_API_KEY not set in .env")

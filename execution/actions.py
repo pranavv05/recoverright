@@ -1,14 +1,13 @@
 import time
+
 from audit.trail import log_audit_event
+from execution.razorpay_client import RateLimitError, ServerError
 
-class RateLimitError(Exception):
-    pass
+COMPANY_NAME = "Arjun Logistics"
 
-class ServerError(Exception):
-    pass
 
 class MaxRetriesExceeded(Exception):
-    pass
+    """Raised when create_payment_link_with_retry exhausts all retry attempts."""
 
 
 def create_payment_link_with_retry(
@@ -91,8 +90,7 @@ def execute_action(
                 invoice_id=invoice["invoice_id"],
                 amount_paise=outstanding_paise,
                 client_name=invoice["client_name"],
-                description=f"Payment for {invoice['invoice_id']} "
-                            f"— Arjun Logistics"
+                description=f"Payment for {invoice['invoice_id']} — {COMPANY_NAME}"
             )
             return {
                 "status": "link_created",

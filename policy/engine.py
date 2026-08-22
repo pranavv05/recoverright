@@ -33,6 +33,7 @@ class PolicyDecision:
     )
 
     def to_audit_entry(self) -> dict:
+        """Returns a plain-dict view of the decision suitable for audit logging."""
         return {
             "invoice_id": self.invoice_id,
             "decision": self.decision,
@@ -44,11 +45,17 @@ class PolicyDecision:
 
 
 def _detect_content(text: str, keywords: list) -> bool:
+    """Returns True if any keyword appears in text (case-insensitive substring match)."""
     text_lower = text.lower()
     return any(kw in text_lower for kw in keywords)
 
 
 def evaluate(inp: PolicyInput) -> PolicyDecision:
+    """Deterministically evaluates a policy input and returns ALLOW / BLOCK / REQUIRE_HUMAN.
+
+    Zero LLM dependency. Evaluation order: content hard-stops → dispute →
+    account sensitivity → financial invariants → evidence tier → severity → ALLOW.
+    """
 
     # ── 1. Content hard-stops FIRST ──────────────────────────────
     if _detect_content(inp.client_notes, INJECTION_KEYWORDS):

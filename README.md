@@ -75,7 +75,7 @@ Batch of overdue invoices
 
 | Layer | Choice |
 |---|---|
-| Backend / orchestration | Python + FastAPI |
+| Backend / orchestration | Python (batch pipeline, no web framework in this repo) |
 | Agent loop | Hand-rolled state machine (readable over clever) |
 | LLM | Groq (`openai/gpt-oss-120b`), structured JSON output |
 | Database | PostgreSQL (Docker) |
@@ -122,7 +122,7 @@ python -m evaluation.run --dataset data/held_out.json
 
 ## Dataset
 
-The dataset is a first-class artifact — not merely seed data. It contains **90 deliberately messy B2B invoices** spanning 13 scenario types, each engineered to test a specific agent behavior, each hand-labelled with ground truth.
+The dataset is a first-class artifact — not merely seed data. It contains **93 deliberately messy B2B invoices** spanning 19 scenario types, each engineered to test a specific agent behavior, each hand-labelled with ground truth.
 
 ### Ground Truth Schema
 
@@ -145,21 +145,27 @@ The dataset is a first-class artifact — not merely seed data. It contains **90
 |---|---|---|
 | Disputed invoice | 8 | Restraint — refuse to chase |
 | Payment link failure | 8 | Fix the actual problem |
-| Chronic late payer (normal) | 8 | No false positive |
-| Forgotten invoice | 7 | Gentle recovery |
 | Cash flow delay | 8 | Softer intervention |
 | Promise broken | 8 | Reference commitment |
 | Deliberate stall | 8 | Escalation |
+| Chronic late payer (normal) | 7 | No false positive |
+| Forgotten invoice | 7 | Gentle recovery |
+| Wrong contact | 7 | Route to information-gathering, not a reminder |
 | Strategic / high-value | 6 | Human approval required |
 | Unknown — no evidence | 5 | Honest Unknown, not hallucination |
 | Duplicate / incorrect invoice | 5 | Catch error, don't chase |
 | Legal threat | 5 | Hard stop, always |
 | Mixed / ambiguous | 4 | Edge case judgment |
-| Special edge cases | 3 | Prompt injection, NEFT bypass, same-client multi-invoice |
+| Same-client multi-invoice | 2 | Per-invoice reasoning, not per-client |
+| Prompt injection attempt | 1 | Detected and blocked, never followed |
+| NEFT bypass / reconciliation | 1 | Off-platform payment claim, verify before crediting |
+| Dispute + payment conflict | 1 | Conflicting claims in one thread — escalate, don't guess |
+| Invoice amount mismatch | 1 | Link amount ≠ invoice amount — escalate, don't auto-collect |
+| GST invoice request | 1 | Paperwork blocker, not a dispute — escalate for the missing document |
 
-**Split:** 52 seen (used during development) / 38 held-out (never touched until final evaluation).
+**Split:** 52 seen (used during development) / 41 held-out (never touched until final evaluation).
 
-The 3 single-instance edge cases (prompt injection, NEFT bypass, same-client pair) went entirely into the held-out set — they are the "gotcha" tests.
+The single-instance edge cases (prompt injection, NEFT bypass, amount mismatch, GST request, dispute+payment conflict) went entirely into the held-out set — they are the "gotcha" tests.
 
 ---
 
@@ -311,7 +317,7 @@ To be transparent about what this demo actually demonstrates:
 | LLM diagnosis (Groq) | Real API calls |
 | Policy engine decisions | Real deterministic evaluation |
 | Audit trail writes | Real PostgreSQL |
-| Razorpay payment link creation | Real test-mode API |
+| Razorpay payment link creation | Client implemented with retry/backoff (`execution/razorpay_client.py`); the default batch run (`python -m api.main`) does not pass a live client, so link creation is simulated and logged unless one is wired in |
 | Payment verification / reconciliation | Test-mode simulation |
 | Customer email sending | Simulated (logged, not sent) |
 | Customer reply tracking | Synthetic data |

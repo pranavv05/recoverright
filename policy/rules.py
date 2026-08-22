@@ -5,9 +5,6 @@ DAYS_OVERDUE_HARD_REVIEW = 60
 # Account tiers requiring human approval
 HUMAN_APPROVAL_TIERS = {"strategic", "high_value"}
 
-# Actions that are never automated
-NEVER_AUTOMATE = {"flag_for_legal", "cancel_duplicate"}
-
 # Evidence tiers that block aggressive action
 WEAK_EVIDENCE_TIERS = {"unknown"}
 

@@ -1,4 +1,5 @@
 def compute_metrics(results: list) -> dict:
+    """Computes accuracy and safety metrics for a batch of evaluated invoices against ground truth."""
     total = len(results)
 
     cause_correct = sum(
