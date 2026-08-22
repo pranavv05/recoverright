@@ -11,11 +11,13 @@ Standalone — does not require the batch pipeline to have been run first.
 Requires completing a real test-mode payment in the browser; this script
 will not finish automatically.
 """
+import argparse
 import os
 import sys
 import time
 import webbrowser
 
+import httpx
 from dotenv import load_dotenv
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -27,6 +29,7 @@ sys.path.insert(0, REPO_ROOT)
 load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
 from audit.trail import insert_invoice, log_audit_event, insert_recovery, get_recovery
+from database.connection import get_connection
 from diagnosis.diagnoser import diagnose
 from policy.engine import PolicyInput, evaluate
 from execution.razorpay_client import RazorpayClient
@@ -57,6 +60,33 @@ DEMO_INVOICE = {
 
 def rupees(paise: int) -> str:
     return f"Rs {paise / 100:,.2f}"
+
+
+def reset_demo():
+    """Deletes DEMO-1010 from invoices, cascading to its audit_log and recoveries rows,
+    so the script can be run again from scratch."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM audit_log WHERE invoice_id = %s", (INVOICE_ID,))
+            cur.execute("DELETE FROM recoveries WHERE invoice_id = %s", (INVOICE_ID,))
+            cur.execute("DELETE FROM invoices WHERE invoice_id = %s", (INVOICE_ID,))
+    print(f"[RESET] Cleared {INVOICE_ID} from invoices, recoveries, and audit_log\n")
+
+
+def fetch_existing_payment_link(rzp_client: RazorpayClient, reference_id: str) -> dict:
+    """Looks up an already-existing Razorpay payment link by reference_id — used when
+    create_payment_link's idempotency check rejects a duplicate create."""
+    response = httpx.get(
+        f"{rzp_client.BASE_URL}/payment_links",
+        headers=rzp_client.headers,
+        params={"reference_id": reference_id},
+        timeout=15.0
+    )
+    response.raise_for_status()
+    items = response.json().get("payment_links", [])
+    if not items:
+        raise RuntimeError(f"No existing Razorpay payment link found for reference_id={reference_id}")
+    return items[0]
 
 
 def main():
@@ -133,6 +163,18 @@ def main():
     )
     log_audit_event(INVOICE_ID, "execution", {"execution": execution_result})
 
+    if (execution_result.get("status") == "failed_client_error"
+            and "already exists" in (execution_result.get("error") or "")):
+        print("  Payment link already exists (idempotency working correctly)")
+        existing_link = fetch_existing_payment_link(rzp_client, INVOICE_ID)
+        execution_result = {
+            "status": "link_created",
+            "payment_link_id": existing_link["id"],
+            "short_url": existing_link["short_url"],
+            "amount_paise": outstanding
+        }
+        print(f"  Reusing existing link: {execution_result['short_url']}\n")
+
     if execution_result.get("status") != "link_created":
         print(f"  Payment link creation failed: {execution_result}")
         return
@@ -179,4 +221,14 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--reset", action="store_true",
+        help=f"Delete {INVOICE_ID} from invoices (cascades to audit_log/recoveries) before running"
+    )
+    args = parser.parse_args()
+
+    if args.reset:
+        reset_demo()
+
     main()
