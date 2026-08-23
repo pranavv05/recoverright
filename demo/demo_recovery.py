@@ -78,7 +78,7 @@ def reset_demo():
 
 def fetch_existing_payment_link(rzp_client: RazorpayClient, reference_id: str) -> dict:
     """Looks up an already-existing Razorpay payment link by reference_id — used when
-    create_payment_link's idempotency check rejects a duplicate create."""
+    create_payment_link's reference_id uniqueness check rejects a duplicate create."""
     response = httpx.get(
         f"{rzp_client.BASE_URL}/payment_links",
         headers=rzp_client.headers,

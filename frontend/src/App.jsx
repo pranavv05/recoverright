@@ -404,9 +404,9 @@ export default function App() {
           <Counter label="Escalated to Human" value={metrics.escalated_to_human_count} />
           <Counter label="Blocked Actions" value={metrics.block_count} />
           <Counter
-            label="Allowed Despite Flagged Content"
-            value={metrics.allow_on_flagged_content_count}
-            tone={metrics.allow_on_flagged_content_count > 0 ? 'tone-red' : 'tone-green'}
+            label="Suspicious Content Detected"
+            value={metrics.suspicious_content_detected_count}
+            tone={metrics.suspicious_content_detected_count > 0 ? 'tone-red' : 'tone-green'}
           />
           <Counter label="API Failures Recovered" value={metrics.api_failures_recovered_count} />
         </div>

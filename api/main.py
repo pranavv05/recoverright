@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import sys
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -252,16 +252,18 @@ MAX_CSV_ROWS = 500
 MAX_INVOICE_PAISE = 100_00_00_000 * 100
 
 
-def _rupees_to_paise(raw: str, field_name: str, row_num: int) -> int:
+def _rupees_to_paise(raw: str, field_name: str, row_num: int, warnings: list = None) -> int:
     """Parses a rupee amount string into integer paise using exact decimal arithmetic.
 
     Decimal, not float: `float("0.07") * 100` is 7.000000000000001, and the
     error compounds across a book of invoices. Money never touches binary
     floating point anywhere in this codebase.
 
-    Rejects negatives, non-finite values, and amounts finer than one paise
-    rather than silently rounding them — a merchant who typed a third decimal
-    place has a problem worth telling them about.
+    Rejects negatives and non-finite values (inf/-inf/nan) outright — those
+    are not roundable, they're wrong. Sub-paise precision (a third decimal
+    place) is different: it's usually a merchant typo, not garbage, so it is
+    rounded with `ROUND_HALF_UP` and reported as a warning rather than failing
+    the whole row.
     """
     text = (raw or "").strip().replace(",", "").replace("₹", "")
     if text == "":
@@ -273,21 +275,24 @@ def _rupees_to_paise(raw: str, field_name: str, row_num: int) -> int:
         raise ValueError(f"{field_name} in row {row_num} must be a number, got {text!r}")
 
     if not rupees.is_finite():
-        raise ValueError(f"{field_name} in row {row_num} must be a finite number, got {text!r}")
+        raise ValueError(f"{field_name} in row {row_num} is not a valid number, got {text!r}")
     if rupees < 0:
-        raise ValueError(f"{field_name} in row {row_num} cannot be negative, got {text!r}")
+        raise ValueError(f"{field_name} in row {row_num} must be positive, got {text!r}")
 
-    paise = rupees * 100
-    if paise != paise.to_integral_value():
-        raise ValueError(
-            f"{field_name} in row {row_num} has sub-paise precision ({text!r}); "
-            "use at most two decimal places"
+    exact_paise = rupees * 100
+    rounded_paise = exact_paise.to_integral_value(rounding=ROUND_HALF_UP)
+    if exact_paise != rounded_paise:
+        message = (
+            f"{field_name} in row {row_num} ({text!r}) has sub-paise precision — "
+            f"rounded to {int(rounded_paise)} paise"
         )
+        if warnings is not None:
+            warnings.append(message)
 
-    paise = int(paise)
+    paise = int(rounded_paise)
     if paise > MAX_INVOICE_PAISE:
         raise ValueError(
-            f"{field_name} in row {row_num} exceeds the Rs 100 crore per-invoice limit"
+            f"{field_name} in row {row_num} exceeds maximum invoice value (Rs 100 crore cap)"
         )
     return paise
 
@@ -308,7 +313,7 @@ def _optional_int(raw: str, field_name: str, row_num: int, default: int = 0) -> 
     return value
 
 
-def _csv_row_to_invoice(row: dict, row_num: int) -> dict:
+def _csv_row_to_invoice(row: dict, row_num: int, warnings: list) -> dict:
     """Maps one CSV row (already known to have the required columns) onto the internal invoice schema."""
     invoice_id = (row.get("invoice_id") or "").strip()
     if not invoice_id:
@@ -322,16 +327,15 @@ def _csv_row_to_invoice(row: dict, row_num: int) -> dict:
     if not due_date:
         raise ValueError(f"due_date is required in row {row_num}")
 
-    amount_paise = _rupees_to_paise(row.get("amount"), "amount", row_num)
-    if amount_paise <= 0:
-        raise ValueError(f"amount in row {row_num} must be a number")
+    amount_paise = _rupees_to_paise(row.get("amount"), "amount", row_num, warnings)
+    if amount_paise == 0:
+        raise ValueError(f"Amount in row {row_num} must be greater than zero")
 
     days_overdue = _optional_int(row.get("days_overdue"), "days_overdue", row_num)
-    partial_payment_paise = _rupees_to_paise(row.get("partial_payment"), "partial_payment", row_num)
+    partial_payment_paise = _rupees_to_paise(row.get("partial_payment"), "partial_payment", row_num, warnings)
     if partial_payment_paise > amount_paise:
         raise ValueError(
-            f"partial_payment in row {row_num} exceeds the invoice amount — "
-            "the outstanding balance would be negative"
+            f"Partial payment in row {row_num} cannot exceed invoice amount"
         )
 
     payment_history_raw = (row.get("payment_history") or "").strip()
@@ -406,7 +410,7 @@ def parse_csv_upload(raw_bytes: bytes) -> tuple:
             warnings.append(f"Duplicate invoice_id '{invoice_id}' in row {row_num} — skipped")
             continue
 
-        invoice = _csv_row_to_invoice(row, row_num)
+        invoice = _csv_row_to_invoice(row, row_num, warnings)
         seen_ids.add(invoice["invoice_id"])
         invoices.append(invoice)
 
@@ -526,12 +530,14 @@ def api_metrics():
         1 for r in rows
         if r["diagnosis_failed"] or (r["diagnosis"] or {}).get("evidence_tier") == "unknown"
     )
-    # An ALLOW on an invoice the model itself flagged as containing content
-    # aimed at the agent. This is a *live-operation* signal computed from the
-    # model's own flag, and it is NOT the same measurement as the
-    # ground-truth `inappropriate_action_count` in evaluation/metrics.py.
-    # The two are named differently on purpose.
-    allow_on_flagged_content = sum(
+    # An ALLOW on an invoice the model itself flagged as containing suspicious
+    # content — the LLM's own self-reported `suspicious_content_detected` flag
+    # from its diagnosis output. This is a *live-operation* signal, and it is
+    # NOT the same measurement as the ground-truth `inappropriate_action_count`
+    # in evaluation/metrics.py, which counts ALLOWs against labelled data the
+    # dashboard has no access to. Named `suspicious_content_detected_count` so
+    # the two are never mistaken for the same metric.
+    suspicious_content_detected = sum(
         1 for r in rows
         if r["policy_decision"] == "ALLOW"
         and (r["diagnosis"] or {}).get("suspicious_content_detected") is True
@@ -578,7 +584,7 @@ def api_metrics():
         "recoverable_paise": recoverable_paise,
         "requiring_more_data_count": requiring_more_data,
         "escalated_to_human_count": human_count,
-        "allow_on_flagged_content_count": allow_on_flagged_content,
+        "suspicious_content_detected_count": suspicious_content_detected,
         "api_failures_recovered_count": api_failures_recovered,
     }
 

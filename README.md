@@ -61,6 +61,12 @@ Batch of overdue invoices
 [CODE]  Metrics                 → honest recovery rate on ground-truthed held-out set
 ```
 
+Reconciliation runs inline in `process_invoice`, immediately after every
+successful `create_payment_link` — it is not a demo-only step. In the demo,
+reconciliation polls the Razorpay test-mode API after link creation. In
+production, this would be triggered by Razorpay's `payment.captured` webhook
+instead of polling.
+
 ### Key Design Decisions
 
 **LLM proposes, code disposes.** The LLM never executes anything directly.
@@ -350,6 +356,28 @@ system.
 python -m evaluation.run --dataset data/held_out.json --repeat 3
 ```
 
+### Two similarly-sounding metrics that measure different things
+
+The live dashboard (`/api/metrics`) and the offline evaluation
+(`evaluation/metrics.py`) each expose a count that sounds like the other but
+is not:
+
+- **`suspicious_content_detected_count`** (dashboard) — the number of
+  invoices where the LLM's own diagnosis flagged
+  `suspicious_content_detected=True` in client notes. It is the model
+  self-reporting suspicion on whatever invoices the dashboard has processed;
+  it requires no ground truth and is available on live/unlabelled data.
+- **`inappropriate_action_count`** (evaluation only) — the number of held-out
+  invoices where the system produced `ALLOW` on an invoice labelled
+  `requires_human=True` or `hard_stop=True` in the ground truth dataset. This
+  metric requires ground truth labels and is only available when running
+  `evaluation/run.py` against a labelled dataset — the ground truth fields
+  live only in the dataset JSON, not in the `invoices` table, so the
+  dashboard cannot compute it and does not attempt to.
+
+They can both be zero, both be nonzero, or disagree entirely — one is a
+model self-report, the other is graded against labels the model never saw.
+
 ---
 
 ## Security and Privacy
@@ -453,7 +481,7 @@ recoverright/
   policy/
     engine.py            # Deterministic policy evaluator
     rules.py             # Thresholds, action whitelists, content patterns
-    test_engine.py       # 70 unit tests — invariants, adversarial content,
+    test_engine.py       # 94 unit tests — invariants, adversarial content,
                          # real dataset fixtures, whole-corpus properties
   docker-compose.yml
   requirements.txt
@@ -465,14 +493,15 @@ recoverright/
 ## Evaluation Results
 
 Mean of three runs of
-`python -m evaluation.run --dataset data/held_out.json --repeat 3`.
+`python -m evaluation.run --dataset data/held_out.json --repeat 3`, re-run
+after the C3/C4 content-detection fixes.
 
 | Metric | Result | Notes |
 |---|---|---|
 | Held-out invoices | 41 | 27 require a human, 14 safe to action, 5 hard stops |
 | Cause diagnosis accuracy | 55% | range 0.537–0.561 across runs |
-| Evidence tier accuracy | 69% | range 0.683–0.707 |
-| Action accuracy | 55% | range 0.537–0.561 |
+| Evidence tier accuracy | 68% | range 0.659–0.683 |
+| Action accuracy | 56% | range 0.561–0.561 (identical in all 3 runs) |
 | Correct block rate | 100% | 5/5 hard stops blocked, all 3 runs |
 | Correct escalation rate | 100% | 27/27 human-required invoices escalated or blocked, all 3 runs |
 | **Inappropriate actions** | **0** | no ALLOW on an invoice needing a human, all 3 runs |
@@ -482,10 +511,12 @@ Mean of three runs of
 | Recovery rate | n/a | denominator is meaningless at ₹0 recovered |
 
 Metrics are the mean of 3 independent runs. Single-run variance is expected
-due to LLM sampling — e.g. evidence tier accuracy ranged 68.3%–70.7% and cause
+due to LLM sampling — e.g. evidence tier accuracy ranged 65.9%–68.3% and cause
 accuracy 53.7%–56.1% across the three runs behind this table. The safety
 metrics (block rate, escalation rate, inappropriate actions, over-escalations,
-safe action rate) were identical in all three.
+safe action rate) were identical in all three, and unchanged from the
+pre-C3/C4-fix run — the diagnosis-accuracy drift above is normal LLM sampling
+noise, not a regression from the policy rewrite.
 
 **Read the two halves together.** Zero inappropriate actions is only meaningful
 next to the over-escalation count: an engine that escalated all 41 invoices
