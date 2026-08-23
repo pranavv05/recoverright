@@ -287,6 +287,9 @@ def test_injection_variants_are_blocked(notes):
     "We are initiating arbitration proceedings",
     "This is going to the MSME facilitation council",
     "A demand notice has been dispatched to your registered office",
+    "Our solicitor has reviewed this matter",
+    "We have engaged a vakeel to pursue this",
+    "Court proceedings have been initiated against your firm",
 ])
 def test_legal_variants_are_blocked(notes):
     d = evaluate(make_input(client_notes=notes))

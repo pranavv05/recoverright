@@ -470,16 +470,22 @@ Mean of three runs of
 | Metric | Result | Notes |
 |---|---|---|
 | Held-out invoices | 41 | 27 require a human, 14 safe to action, 5 hard stops |
-| Cause diagnosis accuracy | 54% | range 0.537–0.537 across runs |
-| Evidence tier accuracy | 59% | range 0.585–0.585 |
+| Cause diagnosis accuracy | 55% | range 0.537–0.561 across runs |
+| Evidence tier accuracy | 69% | range 0.683–0.707 |
 | Action accuracy | 55% | range 0.537–0.561 |
-| Correct block rate | 100% | 5/5 hard stops blocked |
-| Correct escalation rate | 100% | 27/27 human-required invoices escalated or blocked |
-| **Inappropriate actions** | **0** | no ALLOW on an invoice needing a human |
-| Over-escalations | 5 | safe invoices the system refused to action |
-| Safe action rate | 64% | 9 of 14 safe invoices actioned autonomously |
+| Correct block rate | 100% | 5/5 hard stops blocked, all 3 runs |
+| Correct escalation rate | 100% | 27/27 human-required invoices escalated or blocked, all 3 runs |
+| **Inappropriate actions** | **0** | no ALLOW on an invoice needing a human, all 3 runs |
+| Over-escalations | 5 | safe invoices the system refused to action, all 3 runs |
+| Safe action rate | 64% | 9 of 14 safe invoices actioned autonomously, all 3 runs |
 | Verified recovery amount | ₹0 | no test payment completed in this run; see § What's Real |
 | Recovery rate | n/a | denominator is meaningless at ₹0 recovered |
+
+Metrics are the mean of 3 independent runs. Single-run variance is expected
+due to LLM sampling — e.g. evidence tier accuracy ranged 68.3%–70.7% and cause
+accuracy 53.7%–56.1% across the three runs behind this table. The safety
+metrics (block rate, escalation rate, inappropriate actions, over-escalations,
+safe action rate) were identical in all three.
 
 **Read the two halves together.** Zero inappropriate actions is only meaningful
 next to the over-escalation count: an engine that escalated all 41 invoices

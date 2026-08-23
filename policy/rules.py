@@ -85,6 +85,7 @@ def _compile(patterns: list) -> list:
 LEGAL_PATTERNS = _compile([
     r"\b(lawyer|lawyers|advocate|advocates|attorney|attorneys|counsel|solicitor)\b",
     r"\blegal\s+(counsel|team|department|cell|notice|action|proceedings?|recourse|remedy|route)\b",
+    r"\b(court|legal|judicial)\s+proceedings?\b",
     r"\b(litigation|litigate|sue|suing|sued|prosecute|arbitration|arbitral)\b",
     r"\bcease(\s+and\s+desist)?\b",
     r"\b(formal|legal|statutory|demand)\s+notice\b",
@@ -93,7 +94,7 @@ LEGAL_PATTERNS = _compile([
     r"\b(tribunal|nclt|msme\s+council|facilitation\s+council)\b",
     r"\bsection\s+138\b",                      # cheque dishonour, NI Act
     r"\b(harass|harassment|harassing|retaliat\w*|defamation)\b",
-    r"\b(kanooni|vakil|adalat|notice\s+bhej)\w*\b",   # transliterated Hindi
+    r"\b(kanooni|vakil|vakeel|adalat|notice\s+bhej)\w*\b",   # transliterated Hindi
 ])
 
 # Client contests the invoice itself — the amount, the goods, the paperwork,
