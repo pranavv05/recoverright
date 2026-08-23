@@ -253,6 +253,60 @@ function WhyNot({ trail }) {
   )
 }
 
+const DECISION_TONE_CLASS = {
+  ALLOW: 'reasoning-tone-allow',
+  BLOCK: 'reasoning-tone-block',
+  REQUIRE_HUMAN: 'reasoning-tone-human',
+}
+
+function ReasoningChain({ trail }) {
+  const reasoningEvent = findLastEvent(trail, 'reasoning_trace')
+  if (!reasoningEvent || !reasoningEvent.diagnosis) return null
+
+  const data = reasoningEvent.diagnosis
+  const signals = data.signals || {}
+  const policyEvent = findLastEvent(trail, 'policy_decision')
+  const toneClass = DECISION_TONE_CLASS[policyEvent?.decision] || 'reasoning-tone-none'
+
+  const thoughts = [
+    ['Thought 1 — Engagement', data.thought_1_engagement],
+    ['Thought 2 — Content', data.thought_2_content],
+    ['Thought 3 — Payment history', data.thought_3_payment_history],
+    ['Thought 4 — Evidence quality', data.thought_4_evidence_quality],
+    ['Thought 5 — Cause and action', data.thought_5_cause_and_action],
+  ]
+
+  return (
+    <div className="reasoning-chain">
+      <div className="reasoning-chain-title">REASONING CHAIN</div>
+
+      <div className="reasoning-signals">
+        <div className="reasoning-signals-title">Signal extraction:</div>
+        <div className="reasoning-signal-row">
+          <span className="reasoning-signal-label">Engagement:</span> {signals.engagement_signal || '—'}
+        </div>
+        <div className="reasoning-signal-row">
+          <span className="reasoning-signal-label">Payment history:</span> {signals.payment_history_pattern || '—'}
+        </div>
+        <div className="reasoning-signal-row">
+          <span className="reasoning-signal-label">Content:</span> {signals.content_signal || '—'}
+          {signals.content_detail ? ` — ${signals.content_detail}` : ''}
+        </div>
+        <div className="reasoning-signal-row">
+          <span className="reasoning-signal-label">Evidence available:</span> {signals.evidence_available ? 'yes' : 'no'}
+        </div>
+      </div>
+
+      {thoughts.map(([label, text]) => (
+        <div className={`reasoning-thought ${toneClass}`} key={label}>
+          <div className="reasoning-thought-label">{label}</div>
+          <div className="reasoning-thought-text">{text || '—'}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function DetailPanel({ invoiceId, invoice, trail, loading, onClose }) {
   if (!invoiceId) {
     return (
@@ -277,6 +331,7 @@ function DetailPanel({ invoiceId, invoice, trail, loading, onClose }) {
       {!loading && trail && (
         <>
           <WhyNot trail={trail} />
+          <ReasoningChain trail={trail} />
 
           <div className="audit-title">AUDIT TRAIL</div>
           <div className="audit-list">
@@ -297,10 +352,15 @@ function DetailPanel({ invoiceId, invoice, trail, loading, onClose }) {
                 {event.blocked_actions?.length > 0 && (
                   <div className="audit-event-detail">blocked: {event.blocked_actions.join(', ')}</div>
                 )}
-                {event.diagnosis && (
+                {event.diagnosis && event.diagnosis.diagnosed_cause && (
                   <div className="audit-event-detail">
                     cause: {event.diagnosis.diagnosed_cause} · evidence: {event.diagnosis.evidence_tier}
                     {event.diagnosis.evidence_cited && <> · "{event.diagnosis.evidence_cited}"</>}
+                  </div>
+                )}
+                {event.event_type === 'reasoning_trace' && event.diagnosis && (
+                  <div className="audit-event-detail">
+                    5-thought reasoning chain recorded — see REASONING CHAIN above
                   </div>
                 )}
                 {event.execution_result && (

@@ -85,6 +85,22 @@ def process_invoice(invoice: dict, api_key: str, rzp_client=None) -> dict:
         })
         return {"invoice_id": invoice_id, "status": "diagnosis_failed", "error": str(e)}
 
+    # The ReAct reasoning chain and the signals it was built from are for the
+    # audit trail only — the policy engine gets the same clean diagnosis dict
+    # it always has, never these two internal keys.
+    reasoning_trace = diagnosis.pop("_reasoning_trace", {})
+    signals = diagnosis.pop("_signals", {})
+
+    log_audit_event(invoice_id, "reasoning_trace", {
+        "diagnosis": {
+            "signals": signals,
+            "thought_1_engagement": reasoning_trace.get("thought_1_engagement"),
+            "thought_2_content": reasoning_trace.get("thought_2_content"),
+            "thought_3_payment_history": reasoning_trace.get("thought_3_payment_history"),
+            "thought_4_evidence_quality": reasoning_trace.get("thought_4_evidence_quality"),
+            "thought_5_cause_and_action": reasoning_trace.get("thought_5_cause_and_action"),
+        },
+    })
     log_audit_event(invoice_id, "diagnosis", {"diagnosis": diagnosis})
 
     policy_input = PolicyInput(
