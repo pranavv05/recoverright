@@ -25,6 +25,7 @@ from policy.rules import (
     HUMAN_ONLY_ACTIONS,
     INJECTION_PATTERNS,
     KNOWN_ACTIONS,
+    LEGAL_FALSE_POSITIVE_PATTERNS,
     LEGAL_PATTERNS,
     MAX_REMINDERS_BEFORE_ESCALATION,
     UNVERIFIED_PAYMENT_CLAIM_PATTERNS,
@@ -90,8 +91,28 @@ def detect_injection(client_notes: str) -> str:
 
 
 def detect_legal(client_notes: str) -> str:
-    """Returns the matched legal-threat phrase, or "" if none."""
-    return _matches(client_notes, LEGAL_PATTERNS)
+    """Returns the matched legal-threat phrase, or "" if none.
+
+    "advocate" and "counsel" are ambiguous words — each has a common
+    non-legal verb sense ("advocate for timely payment", "counsel your
+    team"). The LEGAL_PATTERNS regex already excludes the adjacent-verb form
+    via negative lookahead; this second check exists for the cases the
+    lookahead's fixed-width assumption misses, using the same
+    deny-unless-corroborated logic as detect_dispute(): a false-positive
+    reading only suppresses the hit when nothing else in the note
+    independently signals a legal threat.
+    """
+    hit = _matches(client_notes, LEGAL_PATTERNS)
+    if not hit:
+        return ""
+    if _matches(client_notes, LEGAL_FALSE_POSITIVE_PATTERNS):
+        remaining = [
+            pattern for pattern in LEGAL_PATTERNS
+            if pattern.search(client_notes) and pattern.search(client_notes).group(0) != hit
+        ]
+        if not remaining:
+            return ""
+    return hit
 
 
 def detect_dispute(client_notes: str) -> str:

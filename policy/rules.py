@@ -78,23 +78,58 @@ def _compile(patterns: list) -> list:
     return [re.compile(p, re.IGNORECASE | re.UNICODE) for p in patterns]
 
 
-# Client has engaged, or is invoking, legal process. Deliberately includes the
-# Indian-English vocabulary an actual Indian B2B counterparty uses — "advocate"
-# is the standard term here, "lawyer" is the exception — plus the statutory
-# forums a receivables dispute in India actually escalates to.
+# Client has engaged, or is invoking, legal process. Deliberately includes
+# the Indian-English legal vocabulary an actual Indian B2B counterparty
+# uses — advocate (the standard Indian term for a legal professional, not
+# "lawyer"), vakeel (Hindi), attorney, solicitor, counsel/legal counsel,
+# barrister, legal advisor — plus the phrases and statutory forums a
+# receivables dispute in India actually escalates to: legal notice, legal
+# recourse, court/consumer forum, arbitration, cease and desist, without
+# prejudice. All patterns use \b word boundaries so "advocate" cannot match
+# inside "advocacy" nor "counsel" inside "counselling".
+#
+# \b alone isn't enough for "advocate" and "counsel" specifically — both have
+# a common non-legal verb sense as *separate whole words* ("advocate for
+# timely payment", "counsel your team"), which \b does not exclude. Those are
+# carved out with a negative lookahead here, and confirmed by
+# LEGAL_FALSE_POSITIVE_PATTERNS + detect_legal() in engine.py, which applies
+# the same deny-unless-corroborated logic used for dispute negation: a
+# false-positive reading only suppresses the hit when nothing else in the
+# note independently signals a legal threat.
 LEGAL_PATTERNS = _compile([
-    r"\b(lawyer|lawyers|advocate|advocates|attorney|attorneys|counsel|solicitor)\b",
-    r"\blegal\s+(counsel|team|department|cell|notice|action|proceedings?|recourse|remedy|route)\b",
+    r"\b(lawyer|lawyers|attorney|attorneys|solicitor|solicitors|"
+    r"barrister|barristers)\b",
+    r"\badvocate(s)?\b(?!\s+for\b)",
+    r"\bcounsel(s)?\b(?!\s+(your|them|him|her|us|our|his|its|their)\b)",
+    r"\blegal\s+(counsel|team|department|cell|notice|action|proceedings?|"
+    r"recourse|remedy|route|matter|advisor|advisors)\b",
+    r"\breferred\s+\w{0,12}\s?to\s+(our\s+)?legal\s+team\b",
     r"\b(court|legal|judicial)\s+proceedings?\b",
+    r"\bcourt\s+action\b",
     r"\b(litigation|litigate|sue|suing|sued|prosecute|arbitration|arbitral)\b",
     r"\bcease(\s+and\s+desist)?\b",
+    r"\bwithout\s+prejudice\b",
     r"\b(formal|legal|statutory|demand)\s+notice\b",
     r"\b(complaint|case|suit|fir)\s+(filed|lodged|registered)\b",
     r"\b(consumer|civil|commercial)\s+court\b",
+    r"\bconsumer\s+forum\b",
     r"\b(tribunal|nclt|msme\s+council|facilitation\s+council)\b",
     r"\bsection\s+138\b",                      # cheque dishonour, NI Act
     r"\b(harass|harassment|harassing|retaliat\w*|defamation)\b",
     r"\b(kanooni|vakil|vakeel|adalat|notice\s+bhej)\w*\b",   # transliterated Hindi
+    r"\bcourt\s+(jaane|jaayenge|jaenge|jayenge|chalte)\w*\b",  # "going to court"
+    r"\bkanoon(\s+ka)?\s+sahara\b",                             # "take legal recourse"
+])
+
+# The common non-legal sense of "advocate" (verb: to champion something) and
+# "counsel" (verb: to advise someone) that the inline negative lookaheads
+# above cannot fully rule out on their own — kept as a second signal so
+# detect_legal() can confirm a false-positive reading the same way
+# detect_dispute() confirms a negation, rather than trusting the lookahead in
+# isolation.
+LEGAL_FALSE_POSITIVE_PATTERNS = _compile([
+    r"\badvocate(s)?\s+for\b",
+    r"\bcounsel(s)?\s+(your|them|him|her|us|our|his|its|their)\b",
 ])
 
 # Client contests the invoice itself — the amount, the goods, the paperwork,
@@ -193,10 +228,15 @@ AMBIGUITY_PATTERNS = _compile([
     r"(excuse|stall|delay\s+tactic|pretext)\b",
 ])
 
-# Attempts to steer the agent rather than describe the invoice. Written as
-# behavioural families — override verb + directive object, payment
-# redirection, state forgery, role hijack — plus raw Indian bank-account
-# identifiers, which no legitimate client_notes field has any reason to carry.
+# Attempts to steer the agent rather than describe the invoice. Detects
+# semantic intent, not exact phrases, across five attack families: (1)
+# instruction override — cancel/ignore/replace the system's rules, (2)
+# payment redirection — move money to an account the invoice didn't specify,
+# (3) invoice manipulation — declare the invoice paid/settled/closed without
+# an actual payment, (4) credential/information extraction — solicit API
+# keys, secrets, or the system prompt, (5) transliterated Hindi bypass
+# attempts, plus raw Indian bank-account identifiers, which no legitimate
+# client_notes field has any reason to carry.
 INJECTION_PATTERNS = _compile([
     # override verb + directive object
     r"\b(ignore|disregard|forget|discard|skip|bypass|overrid\w+|suspend|"
