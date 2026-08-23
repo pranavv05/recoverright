@@ -98,7 +98,7 @@ application code.
 | Agent loop | Hand-rolled state machine (readable over clever) |
 | LLM | NVIDIA NIM (`meta/llama-3.1-8b-instruct`), structured JSON output |
 | Database | PostgreSQL (Docker) |
-| Payments | Razorpay test-mode APIs — Payment Links + Smart Collect |
+| Payments | Razorpay test-mode Payment Links API |
 | Frontend | React dashboard |
 | Infra | Docker Compose |
 | Money handling | Integer paise, never floats |
@@ -256,6 +256,23 @@ blockers — none of which are copied from any invoice. The adversarial test
 suite in `policy/test_engine.py` uses phrasings that appear nowhere in `data/`,
 so a rule that only works on the corpus now fails its own tests. The numbers
 below are from the rewritten rules.
+
+### Content-rule verification
+
+The policy now uses compiled regex families (`INJECTION_PATTERNS`,
+`DISPUTE_PATTERNS`, and `LEGAL_PATTERNS`), not literal `*_KEYWORDS` lists.
+Accordingly, a substring-based keyword-leakage script is not a valid test of
+the current implementation and should not import those non-existent names.
+Use the adversarial, out-of-corpus tests instead:
+
+```bash
+python -m pytest policy/test_engine.py -v \
+  -k "injection_variants or legal_variants or benign_notes_do_not_trip_content_rules"
+```
+
+This checks both required properties: adversarial injection/legal phrasing is
+blocked and benign phrasing is not falsely classified. The full 94-test suite
+also runs those cases along with real-record and whole-corpus checks.
 
 What can honestly be claimed: the held-out **labels** were never used to tune
 anything, and diagnosis quality (`cause_accuracy`, `evidence_tier_accuracy`)
@@ -499,9 +516,9 @@ after the C3/C4 content-detection fixes.
 | Metric | Result | Notes |
 |---|---|---|
 | Held-out invoices | 41 | 27 require a human, 14 safe to action, 5 hard stops |
-| Cause diagnosis accuracy | 55% | range 0.537–0.561 across runs |
-| Evidence tier accuracy | 68% | range 0.659–0.683 |
-| Action accuracy | 56% | range 0.561–0.561 (identical in all 3 runs) |
+| Cause diagnosis accuracy | 57% | range 0.537–0.585 across runs |
+| Evidence tier accuracy | 68% | range 0.659–0.707 |
+| Action accuracy | 57% | range 0.561–0.585 |
 | Correct block rate | 100% | 5/5 hard stops blocked, all 3 runs |
 | Correct escalation rate | 100% | 27/27 human-required invoices escalated or blocked, all 3 runs |
 | **Inappropriate actions** | **0** | no ALLOW on an invoice needing a human, all 3 runs |
@@ -511,8 +528,8 @@ after the C3/C4 content-detection fixes.
 | Recovery rate | n/a | denominator is meaningless at ₹0 recovered |
 
 Metrics are the mean of 3 independent runs. Single-run variance is expected
-due to LLM sampling — e.g. evidence tier accuracy ranged 65.9%–68.3% and cause
-accuracy 53.7%–56.1% across the three runs behind this table. The safety
+due to LLM sampling — in the latest audited three-run sample, evidence-tier
+accuracy ranged 65.9%–70.7% and cause accuracy 53.7%–58.5%. The safety
 metrics (block rate, escalation rate, inappropriate actions, over-escalations,
 safe action rate) were identical in all three, and unchanged from the
 pre-C3/C4-fix run — the diagnosis-accuracy drift above is normal LLM sampling

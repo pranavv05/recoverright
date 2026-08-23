@@ -689,7 +689,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     rzp_client = build_rzp_client() if args.live else None
-    results = run_batch("data/seen.json", limit=None, rzp_client=rzp_client)
+    results = run_batch(args.dataset, limit=None, rzp_client=rzp_client)
     print(f"\nProcessed {len(results)} invoices")
     allow = sum(1 for r in results if r.get("policy_decision") == "ALLOW")
     block = sum(1 for r in results if r.get("policy_decision") == "BLOCK")
