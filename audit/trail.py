@@ -16,7 +16,7 @@ decision — visible in the trail as a gap, which is the intended behaviour.
 import json
 from datetime import datetime, timezone
 
-from database.connection import get_connection
+from database.connection import get_async_connection, get_connection
 
 
 def log_audit_event(invoice_id: str, event_type: str, payload: dict) -> None:
@@ -181,3 +181,76 @@ def get_audit_trail(invoice_id: str) -> list:
                 (invoice_id,)
             )
             return cur.fetchall()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Async twins
+#
+# Used only by the parallel batch path in api/main.py. Each is a line-for-line
+# mirror of the synchronous function above it — same statement, same
+# parameters, same one-statement-one-transaction consistency model — differing
+# only in that it awaits a pooled connection instead of opening its own. The
+# SQL is repeated rather than shared because the synchronous functions are the
+# ones the evaluation runner, the demo scripts and the CSV upload depend on,
+# and they were deliberately left untouched by the parallel refactor. Any
+# change to a statement below must be made in both copies.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+async def log_audit_event_async(invoice_id: str, event_type: str, payload: dict) -> None:
+    """Async twin of log_audit_event(). Identical SQL, pooled connection."""
+    async with get_async_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO audit_log (invoice_id, event_type, decision, reasons,
+                    allowed_actions, blocked_actions, diagnosis, execution_result)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    invoice_id,
+                    event_type,
+                    payload.get("decision"),
+                    json.dumps(payload.get("reasons", [])),
+                    json.dumps(payload.get("allowed_actions", [])),
+                    json.dumps(payload.get("blocked_actions", [])),
+                    json.dumps(payload.get("diagnosis")) if payload.get("diagnosis") else None,
+                    json.dumps(payload.get("execution")) if payload.get("execution") else None,
+                )
+            )
+
+
+async def insert_invoice_async(invoice: dict) -> None:
+    """Async twin of insert_invoice(). Identical upsert, pooled connection."""
+    outstanding = invoice["amount_paise"] - invoice["partial_payment_received_paise"]
+    async with get_async_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO invoices (
+                    invoice_id, client_name, amount_paise, outstanding_balance_paise,
+                    days_overdue, account_value_tier, scenario_type, true_cause,
+                    client_notes, processed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (invoice_id) DO UPDATE SET
+                    client_name = EXCLUDED.client_name,
+                    amount_paise = EXCLUDED.amount_paise,
+                    outstanding_balance_paise = EXCLUDED.outstanding_balance_paise,
+                    days_overdue = EXCLUDED.days_overdue,
+                    account_value_tier = EXCLUDED.account_value_tier,
+                    client_notes = EXCLUDED.client_notes,
+                    processed_at = EXCLUDED.processed_at
+                """,
+                (
+                    invoice["invoice_id"],
+                    invoice["client_name"],
+                    invoice["amount_paise"],
+                    outstanding,
+                    invoice["days_overdue"],
+                    invoice["account_value_tier"],
+                    invoice["scenario_type"],
+                    invoice["true_cause"],
+                    invoice.get("client_notes") or "",
+                    datetime.now(timezone.utc)
+                )
+            )

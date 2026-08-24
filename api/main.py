@@ -4,8 +4,15 @@
 the CLI batch, the dashboard's Run Batch button, the CSV upload, and the
 held-out evaluation. There is deliberately no second code path that can
 reach the executor.
+
+`process_invoice_async` is that same pipeline with the waiting taken out of
+the way: same stages in the same order, same audit events, same policy engine,
+same workers. It exists because the batch was spending nearly all of its
+five minutes blocked on the LLM one invoice at a time. What changes is how
+many invoices are in flight at once — never what happens to any one of them.
 """
 
+import asyncio
 import csv
 import io
 import json
@@ -21,10 +28,21 @@ from fastapi.responses import FileResponse
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
-from audit.trail import get_audit_trail, insert_invoice, log_audit_event
-from database.connection import get_connection
+from audit.trail import (
+    get_audit_trail,
+    insert_invoice,
+    insert_invoice_async,
+    log_audit_event,
+    log_audit_event_async,
+)
+from database.connection import (
+    close_pool,
+    get_connection,
+    loop_supports_async_pg,
+    run_async,
+)
 from policy.engine import PolicyInput, evaluate
-from diagnosis.diagnoser import diagnose
+from diagnosis.diagnoser import close_async_clients, diagnose, diagnose_async
 from execution.razorpay_client import RazorpayClient
 from execution.workers import Orchestrator
 
@@ -187,6 +205,216 @@ def run_batch(dataset_path: str, limit: int = None, rzp_client=None) -> list:
         )
 
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Parallel batch path
+#
+# The sequential runner above spends its wall-clock time waiting: two LLM
+# calls per invoice, one invoice at a time. Running the invoices concurrently
+# is safe because each one is independent — no invoice's diagnosis, policy
+# decision or execution reads anything another invoice wrote — and because
+# the two shared resources are bounded: diagnosis/diagnoser.py caps in-flight
+# LLM requests with a semaphore, and database/connection.py caps concurrent
+# writes with a connection pool.
+#
+# The synchronous functions above are untouched and remain the path used by
+# the evaluation runner, the demo scripts and the CSV upload.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+async def process_invoice_async(invoice: dict, api_key: str, rzp_client=None) -> dict:
+    """Async twin of process_invoice(). Same stages, same audit trail, same result.
+
+    Every difference is mechanical: awaited audit writes, awaited diagnosis,
+    awaited worker. The policy engine is the one stage that stays synchronous
+    — it is pure CPU-bound Python over a fixed record, so it runs in the
+    default executor rather than blocking the event loop for every other
+    invoice while it evaluates.
+    """
+    invoice_id = invoice["invoice_id"]
+
+    await insert_invoice_async(invoice)
+
+    outstanding = invoice["amount_paise"] - invoice["partial_payment_received_paise"]
+    if outstanding <= 0:
+        await log_audit_event_async(invoice_id, "skipped", {
+            "reason": "outstanding_balance_zero_or_negative",
+            "execution": {"status": "skipped", "outstanding_balance_paise": outstanding},
+        })
+        return {"invoice_id": invoice_id, "status": "skipped"}
+
+    try:
+        diagnosis = await diagnose_async(invoice, api_key)
+    except Exception as e:
+        log.exception("[%s] diagnosis failed", invoice_id)
+        await log_audit_event_async(invoice_id, "diagnosis_failed", {
+            "error": str(e),
+            "execution": {"status": "diagnosis_failed", "error": str(e)},
+        })
+        return {"invoice_id": invoice_id, "status": "diagnosis_failed", "error": str(e)}
+
+    reasoning_trace = diagnosis.pop("_reasoning_trace", {})
+    signals = diagnosis.pop("_signals", {})
+
+    await log_audit_event_async(invoice_id, "reasoning_trace", {
+        "diagnosis": {
+            "signals": signals,
+            "thought_1_engagement": reasoning_trace.get("thought_1_engagement"),
+            "thought_2_content": reasoning_trace.get("thought_2_content"),
+            "thought_3_payment_history": reasoning_trace.get("thought_3_payment_history"),
+            "thought_4_evidence_quality": reasoning_trace.get("thought_4_evidence_quality"),
+            "thought_5_cause_and_action": reasoning_trace.get("thought_5_cause_and_action"),
+        },
+    })
+    await log_audit_event_async(invoice_id, "diagnosis", {"diagnosis": diagnosis})
+
+    policy_input = PolicyInput(
+        invoice_id=invoice_id,
+        amount_paise=invoice["amount_paise"],
+        outstanding_balance_paise=outstanding,
+        days_overdue=invoice["days_overdue"],
+        account_value_tier=invoice["account_value_tier"],
+        evidence_tier=diagnosis.get("evidence_tier", "unknown"),
+        recommended_action=diagnosis.get("recommended_action", "gather_information"),
+        requested_amount_paise=outstanding,
+        existing_payment_link=invoice["payment_link_status"] == "active",
+        client_notes=invoice.get("client_notes") or "",
+        hard_stop=invoice.get("hard_stop", False),
+        diagnosed_cause=diagnosis.get("diagnosed_cause", "unknown"),
+        reminders_sent=invoice["reminders_sent"],
+    )
+    decision = await asyncio.get_running_loop().run_in_executor(
+        None, evaluate, policy_input
+    )
+
+    await log_audit_event_async(invoice_id, "policy_decision", {
+        "decision": decision.decision,
+        "reasons": decision.reasons,
+        "allowed_actions": decision.allowed_actions,
+        "blocked_actions": decision.blocked_actions,
+        "diagnosis": diagnosis,
+    })
+
+    execution_result = await _orchestrator.execute_async(
+        invoice=invoice,
+        diagnosis=diagnosis,
+        decision=decision,
+        rzp_client=rzp_client,
+    )
+
+    await log_audit_event_async(invoice_id, "execution_complete", {
+        "worker": execution_result.get("worker"),
+        "status": execution_result.get("status"),
+        "execution": execution_result,
+    })
+
+    return {
+        "invoice_id": invoice_id,
+        "diagnosis": diagnosis,
+        "policy_decision": decision.decision,
+        "policy_reasons": decision.reasons,
+        "worker": execution_result.get("worker"),
+        "execution": execution_result,
+    }
+
+
+async def _process_and_report_async(position: int, total: int, invoice: dict,
+                                    api_key: str, rzp_client=None) -> dict:
+    """Processes one invoice and logs its outcome the moment it lands.
+
+    `position` is the invoice's index in the dataset, not its finishing order,
+    so a line in the log can still be matched to a line in the dataset even
+    though the batch no longer completes in order.
+    """
+    result = await process_invoice_async(invoice, api_key, rzp_client)
+    log.info(
+        "%d/%d %s (%s) -> %s | %s",
+        position, total, invoice["invoice_id"], invoice["scenario_type"],
+        result.get("policy_decision", result.get("status", "n/a")),
+        (result.get("diagnosis") or {}).get("diagnosed_cause", "n/a"),
+    )
+    return result
+
+
+async def run_batch_async(dataset_path: str, limit: int = None, rzp_client=None) -> list:
+    """Processes every invoice in the dataset concurrently, returning one result each.
+
+    `return_exceptions=True` is the whole point: an invoice that raises past
+    its own error handling must not cancel the other fifty-one. Such an
+    invoice is logged with its traceback and takes its place in the returned
+    list as an `error` record, so the list always lines up with the dataset.
+    """
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    if not api_key or api_key == "your_nvidia_api_key_here":
+        raise ValueError("NVIDIA_API_KEY not set in .env")
+
+    invoices = load_dataset(dataset_path)
+    if limit:
+        invoices = invoices[:limit]
+
+    total = len(invoices)
+    settled = await asyncio.gather(
+        *(
+            _process_and_report_async(i, total, invoice, api_key, rzp_client)
+            for i, invoice in enumerate(invoices, start=1)
+        ),
+        return_exceptions=True,
+    )
+
+    results = []
+    for invoice, outcome in zip(invoices, settled):
+        if isinstance(outcome, asyncio.CancelledError):
+            # The batch itself was cancelled. Swallowing that would turn a
+            # deliberate shutdown into a silent partial run.
+            raise outcome
+        if isinstance(outcome, BaseException):
+            log.error(
+                "[%s] invoice failed outside its own error handling: %s",
+                invoice["invoice_id"], outcome,
+                exc_info=(type(outcome), outcome, outcome.__traceback__),
+            )
+            results.append({
+                "invoice_id": invoice["invoice_id"],
+                "status": "error",
+                "error": f"{type(outcome).__name__}: {outcome}",
+            })
+        else:
+            results.append(outcome)
+
+    return results
+
+
+async def _run_batch_with_cleanup(dataset_path: str, rzp_client=None) -> list:
+    """Runs the parallel batch and releases everything bound to this event loop.
+
+    The connection pool and the AsyncOpenAI clients hold sockets that belong
+    to the running loop; leaving them open past the end of the loop leaks
+    them. `finally`, so a batch that raises still cleans up.
+    """
+    try:
+        return await run_batch_async(dataset_path, rzp_client=rzp_client)
+    finally:
+        await close_async_clients()
+        await close_pool()
+
+
+def run_batch_blocking(dataset_path: str, rzp_client=None) -> list:
+    """Runs the parallel batch to completion from synchronous code."""
+    return run_async(_run_batch_with_cleanup(dataset_path, rzp_client))
+
+
+async def _dispatch_batch_async(dataset_path: str, rzp_client=None) -> list:
+    """Runs the parallel batch on an event loop the connection pool can use.
+
+    On Windows uvicorn serves on a ProactorEventLoop, which psycopg's async
+    connections cannot run on. Rather than dictating how the server must be
+    started, the batch is handed to a worker thread with its own selector
+    loop; everywhere else it runs directly on the serving loop.
+    """
+    if loop_supports_async_pg(asyncio.get_running_loop()):
+        return await _run_batch_with_cleanup(dataset_path, rzp_client)
+    return await asyncio.to_thread(run_batch_blocking, dataset_path, rzp_client)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -549,9 +777,15 @@ def api_metrics():
 
 
 @app.post("/api/run-batch")
-def api_run_batch():
-    """Triggers the batch pipeline against data/seen.json, simulated (no real Razorpay calls)."""
-    results = run_batch("data/seen.json", limit=None, rzp_client=None)
+async def api_run_batch():
+    """Triggers the batch pipeline against data/seen.json, simulated (no real Razorpay calls).
+
+    Declared `async def`: the batch is itself concurrent, so it belongs on the
+    event loop rather than in Starlette's threadpool. Counted the same way as
+    the sequential runner — an invoice that failed has no `policy_decision`
+    and so contributes to none of the three totals.
+    """
+    results = await _dispatch_batch_async("data/seen.json", rzp_client=None)
     return {
         "processed": len(results),
         "allow": sum(1 for r in results if r.get("policy_decision") == "ALLOW"),
@@ -648,7 +882,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     rzp_client = build_rzp_client() if args.live else None
-    results = run_batch(args.dataset, limit=None, rzp_client=rzp_client)
+    results = run_batch_blocking(args.dataset, rzp_client=rzp_client)
     print(f"\nProcessed {len(results)} invoices")
     allow = sum(1 for r in results if r.get("policy_decision") == "ALLOW")
     block = sum(1 for r in results if r.get("policy_decision") == "BLOCK")

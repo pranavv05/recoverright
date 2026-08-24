@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -512,6 +513,235 @@ def diagnose(invoice: dict, api_key: str = None) -> dict:
     time.sleep(INTRA_DIAGNOSIS_DELAY_SECONDS)
 
     react_output = _reason_with_react(invoice, signals, api_key)
+    reasoning_trace, diagnosis = _parse_react_output(react_output, invoice_id)
+
+    diagnosis["_reasoning_trace"] = reasoning_trace
+    diagnosis["_signals"] = signals
+
+    return diagnosis
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Async diagnosis
+#
+# The same two-call ReAct sequence as diagnose(), driven by AsyncOpenAI so a
+# batch can have many invoices in flight at once. Everything that decides
+# *what* the diagnosis says — the prompts, the retry policy,
+# normalise_signals(), normalise_diagnosis(), _parse_react_output() — is
+# shared with the synchronous path, so the two cannot drift apart in
+# behaviour.
+#
+# The semaphore below is the rate limit. NVIDIA NIM's free tier will not take
+# fifty-two simultaneous requests; six in flight is what the batch is allowed
+# to hold. It is enforced around the HTTP call itself rather than around a
+# whole diagnosis, so a request never occupies a slot while it is only
+# sleeping between retries.
+# ─────────────────────────────────────────────────────────────────────────
+
+MAX_CONCURRENT_LLM_CALLS = 6
+
+_llm_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
+_llm_semaphore_loop = None
+
+# One AsyncOpenAI per (event loop, API key). The client owns an httpx
+# connection pool belonging to the loop that created it, so it is cached per
+# loop rather than globally — and reused across the batch's ~104 requests
+# rather than rebuilt per invoice, which would mean a fresh TLS handshake for
+# every call.
+_async_clients = {}
+
+
+def get_llm_semaphore() -> asyncio.Semaphore:
+    """Returns the process-wide cap on in-flight NVIDIA NIM requests.
+
+    Rebuilt if the running loop has changed since it was created: an asyncio
+    primitive binds to the first loop that awaits it and raises on a second
+    one, which would otherwise break any process that runs two batches.
+    """
+    global _llm_semaphore, _llm_semaphore_loop
+
+    loop = asyncio.get_running_loop()
+    if _llm_semaphore_loop is not loop:
+        _llm_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
+        _llm_semaphore_loop = loop
+    return _llm_semaphore
+
+
+def _get_async_client(api_key: str):
+    """Returns the cached AsyncOpenAI client for this loop and key.
+
+    max_retries=0 for the same reason as the synchronous client: the backoff
+    loop in _call_nvidia_async() is the only retry policy, and the SDK's own
+    would compound with it unpredictably.
+    """
+    key = (asyncio.get_running_loop(), api_key)
+    client = _async_clients.get(key)
+    if client is None:
+        client = openai.AsyncOpenAI(
+            base_url=NVIDIA_BASE_URL, api_key=api_key, max_retries=0
+        )
+        _async_clients[key] = client
+    return client
+
+
+async def close_async_clients() -> None:
+    """Closes every cached AsyncOpenAI client. Call before the loop ends."""
+    clients = list(_async_clients.values())
+    _async_clients.clear()
+    for client in clients:
+        await client.close()
+
+
+async def _call_nvidia_async(
+    client, invoice_id: str, system_prompt: str, user_message: str, *,
+    max_tokens: int, json_mode: bool, call_label: str, parse_fn=None
+):
+    """Async twin of _call_nvidia(). Same retry policy, same failure modes.
+
+    Only the waiting differs: `await asyncio.sleep()` instead of
+    `time.sleep()`, so an invoice that is backing off yields the event loop to
+    the others instead of freezing the whole batch.
+    """
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            kwargs = dict(
+                model=NVIDIA_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=0.1,
+                max_tokens=max_tokens,
+                timeout=30.0,
+            )
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            # The semaphore is held for the request only. Parsing, validation
+            # and backoff all happen outside it, so a slot is never occupied
+            # by an invoice that is not actually talking to the API.
+            async with get_llm_semaphore():
+                response = await client.chat.completions.create(**kwargs)
+        except openai.RateLimitError as e:
+            last_error = f"rate limited: {e}"
+            log.warning("[%s] %s rate limited (attempt %d/%d)",
+                        invoice_id, call_label, attempt, MAX_RETRIES)
+            await asyncio.sleep(2 ** attempt)
+            continue
+        except (openai.APIConnectionError, openai.APITimeoutError) as e:
+            last_error = f"network error: {e}"
+            log.warning("[%s] %s request failed (attempt %d/%d): %s",
+                        invoice_id, call_label, attempt, MAX_RETRIES, last_error)
+            await asyncio.sleep(2 ** attempt)
+            continue
+        except openai.APIStatusError as e:
+            if e.status_code >= 500:
+                last_error = f"{e.status_code} server error: {e.message}"
+                log.warning("[%s] %s server error (attempt %d/%d): %s",
+                            invoice_id, call_label, attempt, MAX_RETRIES, last_error)
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise ValueError(
+                f"NVIDIA NIM API error {e.status_code} for {invoice_id} ({call_label}): {e.message}"
+            ) from e
+
+        choice = response.choices[0]
+        content = choice.message.content
+
+        if choice.finish_reason == "length":
+            last_error = f"response truncated at max_tokens: {str(content)[:200]}"
+            log.warning("[%s] %s truncated response (attempt %d/%d)",
+                        invoice_id, call_label, attempt, MAX_RETRIES)
+            continue
+
+        if not content or not content.strip():
+            last_error = "empty response"
+            log.warning("[%s] %s empty response (attempt %d/%d)",
+                        invoice_id, call_label, attempt, MAX_RETRIES)
+            continue
+
+        if parse_fn is None:
+            return content
+
+        try:
+            return parse_fn(content)
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = f"unparseable response: {e} — raw: {str(content)[:300]}"
+            log.warning("[%s] %s unparseable response (attempt %d/%d): %s",
+                        invoice_id, call_label, attempt, MAX_RETRIES, e)
+            continue
+
+    raise ValueError(
+        f"NVIDIA NIM {call_label} failed for {invoice_id} after {MAX_RETRIES} attempts: {last_error}"
+    )
+
+
+async def _extract_signals_async(invoice: dict, api_key: str) -> dict:
+    """Async twin of _extract_signals(). Call 1 of the ReAct sequence."""
+    if not api_key:
+        raise ValueError(
+            f"_extract_signals_async() called without an API key for "
+            f"{invoice.get('invoice_id', '?')} — set NVIDIA_API_KEY in .env"
+        )
+    invoice_id = invoice.get("invoice_id", "?")
+    user_message = SIGNAL_EXTRACTION_USER_TEMPLATE.format(**_invoice_context(invoice))
+    client = _get_async_client(api_key)
+
+    raw = await _call_nvidia_async(
+        client, invoice_id,
+        system_prompt=SIGNAL_EXTRACTION_SYSTEM_PROMPT,
+        user_message=user_message,
+        max_tokens=500,
+        json_mode=True,
+        call_label="signal extraction",
+        parse_fn=_extract_json,
+    )
+    return normalise_signals(raw, invoice)
+
+
+async def _reason_with_react_async(invoice: dict, signals: dict, api_key: str) -> str:
+    """Async twin of _reason_with_react(). Call 2 of the ReAct sequence."""
+    if not api_key:
+        raise ValueError(
+            f"_reason_with_react_async() called without an API key for "
+            f"{invoice.get('invoice_id', '?')} — set NVIDIA_API_KEY in .env"
+        )
+    invoice_id = invoice.get("invoice_id", "?")
+    user_message = REACT_USER_TEMPLATE.format(
+        **_invoice_context(invoice),
+        signals_json=json.dumps(signals, indent=2),
+    )
+    client = _get_async_client(api_key)
+
+    # Not json_mode, for the same reason as the synchronous call: the expected
+    # output is five Thought paragraphs followed by a JSON object.
+    return await _call_nvidia_async(
+        client, invoice_id,
+        system_prompt=REACT_SYSTEM_PROMPT,
+        user_message=user_message,
+        max_tokens=1500,
+        json_mode=False,
+        call_label="ReAct reasoning",
+    )
+
+
+async def diagnose_async(invoice: dict, api_key: str = None) -> dict:
+    """Async twin of diagnose(). Same two calls, same contract, same output.
+
+    Returns the identical normalised dict, `_reasoning_trace` and `_signals`
+    included, so the async pipeline in api/main.py strips exactly what the
+    synchronous one strips.
+    """
+    invoice_id = invoice.get("invoice_id", "?")
+
+    signals = await _extract_signals_async(invoice, api_key)
+
+    # The same stagger the synchronous path applies, awaited rather than
+    # slept: it spaces this invoice's two calls apart without holding the
+    # event loop, which is the whole point of the async path.
+    await asyncio.sleep(INTRA_DIAGNOSIS_DELAY_SECONDS)
+
+    react_output = await _reason_with_react_async(invoice, signals, api_key)
     reasoning_trace, diagnosis = _parse_react_output(react_output, invoice_id)
 
     diagnosis["_reasoning_trace"] = reasoning_trace

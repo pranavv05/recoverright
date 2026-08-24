@@ -22,11 +22,20 @@ upstream of it is a sampled model call.
 Error containment: a worker handles its own failures and returns a result dict
 describing them. It does not raise into the orchestrator, so one invoice's
 Razorpay outage cannot take down the rest of a batch.
+
+Every worker has a second entry point, `execute_async`, used only by the
+parallel batch path. It is the same method with awaited audit writes: same
+routing, same result dicts, same audit vocabulary, same worker-handles-its-own
+-failures contract. Where a worker has to call something synchronous that
+blocks — the Razorpay client, the synchronous recovery upsert — the async path
+hands it to a thread rather than reimplementing it, so there is exactly one
+implementation of every external call.
 """
 
+import asyncio
 import logging
 
-from audit.trail import insert_recovery, log_audit_event
+from audit.trail import insert_recovery, log_audit_event, log_audit_event_async
 from execution.actions import (
     COMPANY_NAME,
     MaxRetriesExceeded,
@@ -228,6 +237,144 @@ class PaymentLinkWorker:
                 invoice_id, "failed", "unexpected_error", e, outstanding,
             )
 
+    async def execute_async(self, invoice, diagnosis, decision, rzp_client=None):
+        """Async twin of execute(). Same result dicts, same audit events.
+
+        The Razorpay client and insert_recovery() are synchronous and stay
+        that way — they are handed to a worker thread so a live payment-link
+        creation cannot block the event loop while other invoices are in
+        flight.
+        """
+        invoice_id = invoice["invoice_id"]
+        outstanding = _outstanding_paise(invoice)
+
+        await log_audit_event_async(invoice_id, "worker_started", {
+            "worker": "payment_link",
+            "outstanding_paise": outstanding,
+        })
+
+        if not rzp_client:
+            execution = {
+                "worker": "payment_link",
+                "status": "simulated",
+                "action": "create_payment_link",
+                "outstanding_paise": outstanding,
+            }
+            await log_audit_event_async(invoice_id, "execution_simulated", {
+                "worker": "payment_link",
+                "action": "create_payment_link",
+                "outstanding_paise": outstanding,
+                "execution": execution,
+            })
+            return execution
+
+        try:
+            result = await asyncio.to_thread(
+                create_payment_link_with_retry,
+                rzp_client=rzp_client,
+                invoice_id=invoice_id,
+                amount_paise=outstanding,
+                client_name=invoice["client_name"],
+                description=f"Payment for {invoice_id} — {COMPANY_NAME}",
+            )
+
+            await asyncio.to_thread(
+                insert_recovery,
+                invoice_id=invoice_id,
+                payment_link_id=result["id"],
+                payment_link_url=result["short_url"],
+                amount_requested_paise=outstanding,
+                status="link_created",
+            )
+
+            await log_audit_event_async(invoice_id, "payment_link_created", {
+                "worker": "payment_link",
+                "payment_link_id": result["id"],
+                "short_url": result["short_url"],
+                "amount_requested_paise": outstanding,
+            })
+
+            reconciliation = await self._attempt_reconciliation_async(
+                invoice_id, result["id"], outstanding, rzp_client
+            )
+
+            return {
+                "worker": "payment_link",
+                "status": "link_created",
+                "payment_link_id": result["id"],
+                "short_url": result["short_url"],
+                "amount_requested_paise": outstanding,
+                "reconciliation": reconciliation,
+            }
+
+        except DuplicateReferenceError as e:
+            return await self._failure_async(
+                invoice_id, "duplicate_link_prevented",
+                "reference_id_already_exists", e, outstanding,
+            )
+        except MaxRetriesExceeded as e:
+            return await self._failure_async(
+                invoice_id, "failed_max_retries",
+                "max_retries_exceeded", e, outstanding,
+            )
+        except ServerError as e:
+            return await self._failure_async(
+                invoice_id, "failed_server_error",
+                "razorpay_server_error_5xx", e, outstanding,
+            )
+        except ValueError as e:
+            return await self._failure_async(
+                invoice_id, "failed_client_error",
+                "razorpay_client_error_4xx", e, outstanding,
+            )
+        except Exception as e:
+            log.exception("[%s] payment_link worker failed unexpectedly", invoice_id)
+            return await self._failure_async(
+                invoice_id, "failed", "unexpected_error", e, outstanding,
+            )
+
+    async def _failure_async(self, invoice_id, status, reason, exc, outstanding):
+        """Async twin of _failure(). Identical event, identical result dict."""
+        error = f"{type(exc).__name__}: {exc}"
+        execution = {
+            "worker": "payment_link",
+            "status": status,
+            "error": error,
+            "outstanding_paise": outstanding,
+        }
+        await log_audit_event_async(invoice_id, "worker_failed", {
+            "worker": "payment_link",
+            "error": error,
+            "reason": reason,
+            "execution": execution,
+        })
+        return execution
+
+    async def _attempt_reconciliation_async(self, invoice_id, payment_link_id,
+                                            outstanding_paise, rzp_client):
+        """Async twin of _attempt_reconciliation(). Same verification, same events."""
+        try:
+            result = await asyncio.to_thread(
+                reconcile_payment,
+                rzp_client=rzp_client,
+                invoice_id=invoice_id,
+                payment_link_id=payment_link_id,
+            )
+            await log_audit_event_async(invoice_id, "reconciliation_attempted", {
+                "worker": "payment_link",
+                "result": result,
+            })
+            return result
+        except Exception as e:
+            log.warning("[%s] reconciliation check failed: %s", invoice_id, e)
+            await log_audit_event_async(invoice_id, "reconciliation_pending", {
+                "worker": "payment_link",
+                "note": "Payment not yet confirmed — will reconcile on payment",
+                "error": f"{type(e).__name__}: {e}",
+            })
+            return {"status": "pending"}
+
+
     def _failure(self, invoice_id, status, reason, exc, outstanding):
         """Writes one worker_failed event and returns the matching result dict."""
         error = f"{type(exc).__name__}: {exc}"
@@ -314,6 +461,36 @@ class EscalationWorker:
 
         return execution
 
+    async def execute_async(self, invoice, diagnosis, decision, rzp_client=None):
+        """Async twin of execute(). Same priority, same escalation event."""
+        invoice_id = invoice["invoice_id"]
+        priority = self._determine_priority(decision.reasons)
+
+        execution = {
+            "worker": "escalation",
+            "status": "escalated",
+            "priority": priority,
+            "assigned_to": "finance_team",
+            "reasons": decision.reasons,
+        }
+
+        await log_audit_event_async(invoice_id, "escalated_to_human", {
+            "worker": "escalation",
+            "priority": priority,
+            "assigned_to": "finance_team",
+            "reasons": decision.reasons,
+            "blocked_actions": decision.blocked_actions,
+            "diagnosed_cause": diagnosis.get("diagnosed_cause"),
+            "evidence_tier": diagnosis.get("evidence_tier"),
+            "evidence_cited": diagnosis.get("evidence_cited"),
+            "client_name": invoice.get("client_name"),
+            "amount_paise": invoice.get("amount_paise"),
+            "execution": execution,
+        })
+
+        return execution
+
+
     def _determine_priority(self, reasons):
         """Most severe reason wins. Unmapped reasons contribute LOW."""
         best = "LOW"
@@ -371,6 +548,35 @@ class BlockWorker:
 
         return execution
 
+    async def execute_async(self, invoice, diagnosis, decision, rzp_client=None):
+        """Async twin of execute(). Still takes zero customer-facing action."""
+        invoice_id = invoice["invoice_id"]
+
+        block_type = "standard"
+        for reason in decision.reasons or []:
+            if reason in BLOCK_TYPE_MAP:
+                block_type = BLOCK_TYPE_MAP[reason]
+                break
+
+        execution = {
+            "worker": "block",
+            "status": "blocked",
+            "block_type": block_type,
+            "reasons": decision.reasons,
+        }
+
+        await log_audit_event_async(invoice_id, "blocked_no_customer_action", {
+            "worker": "block",
+            "block_type": block_type,
+            "reasons": decision.reasons,
+            "blocked_actions": decision.blocked_actions,
+            "note": "Zero customer-facing actions taken by design",
+            "execution": execution,
+        })
+
+        return execution
+
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # Worker 4 — wait
@@ -409,6 +615,33 @@ class WaitWorker:
 
         return execution
 
+    async def execute_async(self, invoice, diagnosis, decision, rzp_client=None):
+        """Async twin of execute(). Same schedule, same non-action record."""
+        invoice_id = invoice["invoice_id"]
+
+        history = invoice.get("client_payment_history") or []
+        late_count = history.count("paid_late")
+        next_check_days = 7 if late_count >= 4 else 5
+
+        execution = {
+            "worker": "wait",
+            "status": "waiting",
+            "next_check_days": next_check_days,
+            "reason": "chronic_late_payer_within_normal_pattern",
+        }
+
+        await log_audit_event_async(invoice_id, "wait_scheduled", {
+            "worker": "wait",
+            "reason": "chronic_late_payer_within_normal_pattern",
+            "next_check_days": next_check_days,
+            "based_on": "historical_payment_pattern",
+            "late_count_in_history": late_count,
+            "execution": execution,
+        })
+
+        return execution
+
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # Worker 5 — information
@@ -443,6 +676,30 @@ class InformationWorker:
         })
 
         return execution
+
+    async def execute_async(self, invoice, diagnosis, decision, rzp_client=None):
+        """Async twin of execute(). Drafts, queues, and still never sends."""
+        invoice_id = invoice["invoice_id"]
+        draft = self._draft_diagnostic_message(invoice, diagnosis)
+
+        execution = {
+            "worker": "information",
+            "status": "draft_created",
+            "draft_message": draft,
+            "action_required": "human_must_review_and_send",
+        }
+
+        await log_audit_event_async(invoice_id, "information_draft_created", {
+            "worker": "information",
+            "reason": "unknown_evidence_or_information_gathering",
+            "draft_message": draft,
+            "action": "draft_created_not_sent",
+            "note": "Human must review and send — agent does not send when cause is unknown",
+            "execution": execution,
+        })
+
+        return execution
+
 
     def _draft_diagnostic_message(self, invoice, diagnosis):
         """Deliberately neutral copy — it must be safe to send under any cause.
@@ -559,3 +816,25 @@ class Orchestrator:
         })
 
         return worker.execute(invoice, diagnosis, decision, rzp_client)
+
+    async def execute_async(self, invoice, diagnosis, decision, rzp_client=None):
+        """Async twin of execute(). Routes through the same synchronous route().
+
+        Routing is pure and takes microseconds, so it has no async version —
+        awaiting it would add a scheduling hop to a table lookup.
+        """
+        worker_name = self.route(invoice, diagnosis, decision)
+        worker = self._workers[worker_name]
+
+        await log_audit_event_async(invoice["invoice_id"], "orchestrator_routing", {
+            "routed_to": worker_name,
+            "policy_decision": decision.decision,
+            "recommended_action": (
+                decision.allowed_actions[0]
+                if decision.allowed_actions
+                else "none"
+            ),
+            "routing_reason": f"policy={decision.decision}",
+        })
+
+        return await worker.execute_async(invoice, diagnosis, decision, rzp_client)
