@@ -94,6 +94,92 @@
   color: #3ddc84;
 }
 
+/* ── Data source row (Razorpay sync + CSV upload) ───────────── */
+
+.data-source-row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid #262626;
+}
+
+.data-source-row > .rzp-sync,
+.data-source-row > .csv-upload {
+  flex: 1;
+  border-bottom: none;
+}
+
+.data-source-row > .rzp-sync {
+  border-right: 1px solid #262626;
+}
+
+/* ── Razorpay sync ───────────────────────────────────────── */
+
+.rzp-sync {
+  padding: 16px 28px;
+  background: #131313;
+}
+
+.rzp-sync-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f2f2f2;
+}
+
+.rzp-sync-sub {
+  font-size: 12px;
+  color: #8a8a8a;
+  margin-top: 2px;
+}
+
+.rzp-sync-controls {
+  margin-top: 12px;
+}
+
+.rzp-sync-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #2B84EA;
+  color: #fff;
+}
+
+.rzp-sync-btn:hover:not(:disabled) {
+  background: #4a97ee;
+}
+
+.rzp-sync-btn:disabled {
+  background: #262626;
+  color: #777;
+  cursor: not-allowed;
+}
+
+.rzp-sync-error {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #ff5c5c;
+  background: rgba(255, 92, 92, 0.1);
+  border: 1px solid rgba(255, 92, 92, 0.3);
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+
+.rzp-sync-result {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: #d7d7d7;
+  background: #171717;
+  border: 1px solid #262626;
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+
 /* ── CSV upload ──────────────────────────────────────────── */
 
 .csv-upload {

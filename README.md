@@ -153,6 +153,62 @@ cd frontend && npm install && npm run dev   # http://localhost:3000
 
 ---
 
+## Data Ingestion
+
+RecoverRight accepts overdue invoices through three paths:
+
+- **Razorpay API sync (native)** — merchants connect their Razorpay account and RecoverRight pulls overdue invoices directly, no file involved. See § Razorpay Native Sync below.
+- **CSV upload** — export from Tally, Zoho Books, or Excel. See § CSV Upload below.
+- **JSON batch** — the dataset format used for development and evaluation (`python -m api.main --dataset ...`).
+
+All three converge on the same internal invoice schema and run through the identical diagnose → policy → audit pipeline — the entry point never changes what happens to an invoice once it's in the system.
+
+---
+
+## Razorpay Native Sync
+
+Merchants can connect their Razorpay account directly. RecoverRight fetches all overdue invoices via the Razorpay Invoices API, maps them to the internal schema, and runs the full recovery pipeline. No file upload needed.
+
+From the dashboard, click **Sync from Razorpay** next to the CSV upload section. This calls `POST /api/sync-razorpay`, which:
+
+1. Calls `RazorpayClient.fetch_overdue_invoices()` — pages through `GET /v1/invoices` (100 per page), keeping invoices whose `status != "paid"` and whose due date has already passed.
+2. Maps each Razorpay invoice onto the internal invoice schema (see table below).
+3. Runs every mapped invoice through the exact same diagnose → policy → audit pipeline as CSV/JSON invoices — always simulated (`rzp_client=None`), so a sync never creates a live payment link of its own.
+4. Skips any invoice whose `invoice_id` (Razorpay's `id`, prefixed `RZP-`) already exists in the database, with a warning.
+
+**Field mapping:**
+
+| Razorpay field | Internal field | Notes |
+|---|---|---|
+| `id` | `invoice_id` | Prefixed `RZP-` to distinguish from CSV/JSON invoices |
+| `customer.name` (or `customer_details.name`) | `client_name` | Falls back to `"Unknown Razorpay Customer"` if absent |
+| `amount` | `amount_paise` | Razorpay already stores paise — passed through unchanged |
+| `amount_paid` | `partial_payment_received_paise` | |
+| `due_date` (or `expire_by`) | `days_overdue` | `(today - due_date) // 86400`. Live accounts return `expire_by`, not the documented `due_date` — both are checked |
+| `status` + `short_url` | `payment_link_status` | `"active"` if `status == "issued"` and a `short_url` exists, `"expired"` if a link exists but the status doesn't, else `"none"` |
+| `notes` | `client_notes` | Values concatenated; empty string if no notes |
+| — | `account_value_tier` | Always `"standard"` — not a Razorpay concept |
+| — | `client_type` | Always `"razorpay_merchant_client"` |
+| — | `reminders_sent`, `reminders_opened`, `payment_link_attempts`, `client_payment_history` | Not available from a single invoice fetch — default to `0` / `[]`. Diagnosis is built to reason honestly from sparse signals, so this degrades to a lower-confidence diagnosis rather than a crash |
+
+Response shape:
+
+```json
+{
+  "source": "razorpay_api",
+  "invoices_fetched": 2,
+  "processed": 2,
+  "allow": 0,
+  "block": 0,
+  "require_human": 2,
+  "warnings": []
+}
+```
+
+An account with no overdue invoices returns `invoices_fetched: 0` with a `message` field instead of an error. Missing or rejected credentials return `401`; a Razorpay API failure returns `502` with the underlying error in `detail`.
+
+---
+
 ## CSV Upload
 
 Merchants can upload their overdue invoices as CSV directly from Tally, Zoho Books, or Excel. Download the sample CSV to see the expected format.
@@ -475,7 +531,7 @@ This is a buildathon submission, not a production system. Honest gaps:
 recoverright/
   api/
     main.py              # Orchestrator (process_invoice / run_batch), CSV upload,
-                         # and the FastAPI read API the dashboard consumes
+                         # Razorpay sync, and the FastAPI read API the dashboard consumes
   audit/
     trail.py             # Single point for all audit_log writes
   database/
@@ -494,7 +550,8 @@ recoverright/
     metrics.py           # Metric computations — safety measures reported in pairs
   execution/
     actions.py           # Action dispatcher + retry with backoff
-    razorpay_client.py   # Razorpay test-mode HTTP wrapper
+    razorpay_client.py   # Razorpay test-mode HTTP wrapper — payment links + fetch_overdue_invoices
+    test_razorpay_client.py  # fetch_overdue_invoices pagination/filtering/error-mapping tests
   policy/
     engine.py            # Deterministic policy evaluator
     rules.py             # Thresholds, action whitelists, content patterns

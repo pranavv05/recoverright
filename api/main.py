@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import sys
+import time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from dotenv import load_dotenv
@@ -45,7 +46,13 @@ from policy.engine import PolicyInput, evaluate
 from diagnosis.diagnoser import close_async_clients, diagnose, diagnose_async
 from evaluation.analytics import compute_batch_analytics
 from evaluation.health_scorer import score_client_health
-from execution.razorpay_client import RazorpayClient
+from execution.razorpay_client import (
+    AuthenticationError,
+    RateLimitError,
+    RazorpayClient,
+    ServerError,
+    invoice_due_date,
+)
 from execution.workers import Orchestrator
 
 load_dotenv()
@@ -602,6 +609,80 @@ def parse_csv_upload(raw_bytes: bytes) -> tuple:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Razorpay native sync — pulls overdue invoices straight from a merchant's
+# own Razorpay account via the Invoices API, instead of asking them to export
+# a file first. Razorpay already stores money as integer paise, a due_date
+# as a Unix timestamp, and a customer sub-object, so this mapping is a
+# straight field rename rather than the rupee/CSV parsing CSV rows go
+# through. Fields the CSV schema fills from merchant-supplied columns —
+# reminder counts, payment history — don't exist on a single Razorpay
+# invoice record, so they default to empty/zero; diagnosis and policy both
+# already treat those as valid (if uninformative) inputs.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _razorpay_invoice_to_internal(raw: dict) -> dict:
+    """Maps one raw Razorpay invoice (from fetch_overdue_invoices) onto the internal schema."""
+    razorpay_id = raw.get("id")
+    if not razorpay_id:
+        raise ValueError("Razorpay invoice has no 'id' — skipped")
+
+    due_date = invoice_due_date(raw)
+    if due_date is None:
+        raise ValueError(f"Razorpay invoice {razorpay_id} has no valid due_date — skipped")
+
+    amount_paise = raw.get("amount")
+    if not isinstance(amount_paise, int) or isinstance(amount_paise, bool) or amount_paise <= 0:
+        raise ValueError(f"Razorpay invoice {razorpay_id} has an invalid amount — skipped")
+
+    amount_paid_paise = raw.get("amount_paid")
+    if not isinstance(amount_paid_paise, int) or isinstance(amount_paid_paise, bool):
+        amount_paid_paise = 0
+    if amount_paid_paise > amount_paise:
+        raise ValueError(
+            f"Razorpay invoice {razorpay_id} has amount_paid greater than amount — skipped"
+        )
+
+    days_overdue = max(0, (int(time.time()) - due_date) // 86400)
+
+    status = raw.get("status")
+    short_url = raw.get("short_url")
+    if short_url and status == "issued":
+        payment_link_status = "active"
+    elif short_url:
+        payment_link_status = "expired"
+    else:
+        payment_link_status = "none"
+
+    notes = raw.get("notes")
+    client_notes = " ".join(str(v) for v in notes.values()) if isinstance(notes, dict) else ""
+
+    # Documented field is `customer`; live accounts return `customer_details`
+    # instead — same API-generation drift as due_date/expire_by above.
+    customer = raw.get("customer") or raw.get("customer_details") or {}
+    client_name = (customer.get("name") or "").strip() or "Unknown Razorpay Customer"
+
+    return {
+        "invoice_id": f"RZP-{razorpay_id}",
+        "client_name": client_name,
+        "client_type": "razorpay_merchant_client",
+        "amount_paise": amount_paise,
+        "partial_payment_received_paise": amount_paid_paise,
+        "days_overdue": days_overdue,
+        "payment_link_status": payment_link_status,
+        "payment_link_attempts": 0,
+        "reminders_sent": 0,
+        "reminders_opened": 0,
+        "client_notes": client_notes,
+        "client_payment_history": [],
+        "account_value_tier": "standard",
+        "scenario_type": "razorpay_sync",
+        "true_cause": "unknown",
+        "hard_stop": False,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # FastAPI dashboard API — reads the same tables run_batch() writes to.
 # Run with: uvicorn api.main:app --reload --port 8000
 # ─────────────────────────────────────────────────────────────────────────
@@ -926,6 +1007,94 @@ def api_upload_csv(file: UploadFile = File(...)):
         results.append(result)
 
     return {
+        "processed": len(results),
+        "allow": sum(1 for r in results if r.get("policy_decision") == "ALLOW"),
+        "block": sum(1 for r in results if r.get("policy_decision") == "BLOCK"),
+        "require_human": sum(1 for r in results if r.get("policy_decision") == "REQUIRE_HUMAN"),
+        "warnings": warnings,
+    }
+
+
+@app.post("/api/sync-razorpay")
+def api_sync_razorpay(days_overdue_min: int = 1):
+    """
+    Pulls overdue invoices directly from the merchant's own Razorpay account
+    (Invoices API), maps them onto the internal schema, and runs every one
+    through the exact same diagnose → policy → audit pipeline as CSV/JSON
+    invoices. Always simulated (no real Razorpay calls) — a sync never
+    creates live payment links, since these invoices already have one.
+
+    Declared `def`, not `async def`, for the same reason as the CSV upload
+    handler: one synchronous LLM call per invoice would otherwise block the
+    event loop for the duration of the sync.
+    """
+    rzp_client = build_rzp_client()
+    if rzp_client is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Razorpay credentials not configured — set RAZORPAY_KEY_ID "
+                   "and RAZORPAY_KEY_SECRET"
+        )
+
+    try:
+        raw_invoices = rzp_client.fetch_overdue_invoices(days_overdue_min=days_overdue_min)
+    except AuthenticationError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except (RateLimitError, ServerError, ValueError) as e:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to fetch invoices from Razorpay: {e}"
+        )
+
+    if not raw_invoices:
+        return {
+            "source": "razorpay_api",
+            "invoices_fetched": 0,
+            "processed": 0,
+            "allow": 0,
+            "block": 0,
+            "require_human": 0,
+            "warnings": [],
+            "message": "No overdue invoices found in your Razorpay account",
+        }
+
+    warnings = []
+    invoices = []
+    for raw in raw_invoices:
+        try:
+            invoices.append(_razorpay_invoice_to_internal(raw))
+        except ValueError as e:
+            warnings.append(str(e))
+
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    if not api_key or api_key == "your_nvidia_api_key_here":
+        raise HTTPException(status_code=500, detail="NVIDIA_API_KEY not configured on server")
+
+    invoice_ids = [invoice["invoice_id"] for invoice in invoices]
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT invoice_id FROM invoices WHERE invoice_id = ANY(%s)",
+                (invoice_ids,)
+            )
+            existing_ids = {row["invoice_id"] for row in cur.fetchall()}
+
+    new_invoices = []
+    for invoice in invoices:
+        if invoice["invoice_id"] in existing_ids:
+            warnings.append(
+                f"invoice_id {invoice['invoice_id']} already exists in database — skipped"
+            )
+        else:
+            new_invoices.append(invoice)
+
+    results = []
+    for invoice in new_invoices:
+        result = process_invoice(invoice, api_key, rzp_client=None)
+        results.append(result)
+
+    return {
+        "source": "razorpay_api",
+        "invoices_fetched": len(raw_invoices),
         "processed": len(results),
         "allow": sum(1 for r in results if r.get("policy_decision") == "ALLOW"),
         "block": sum(1 for r in results if r.get("policy_decision") == "BLOCK"),

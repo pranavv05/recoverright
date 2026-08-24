@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 
 import httpx
 
@@ -10,6 +11,26 @@ class RateLimitError(Exception):
 
 class ServerError(Exception):
     """Raised when Razorpay responds with a 5xx server error."""
+
+
+class AuthenticationError(Exception):
+    """Raised when Razorpay rejects the account's credentials (401)."""
+
+
+def invoice_due_date(invoice: dict):
+    """Returns an invoice's due-date Unix timestamp, or None if it has none.
+
+    Razorpay's documented Invoice API field is `due_date`, but live accounts
+    on the current API version return `expire_by` instead — `due_date` is
+    rejected outright as a create parameter ("due_date is/are not required
+    and should not be sent"). Both are checked so the sync works against
+    either API generation rather than the one this was tested against.
+    """
+    for field in ("due_date", "expire_by"):
+        value = invoice.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
 
 
 class DuplicateReferenceError(Exception):
@@ -147,3 +168,68 @@ class RazorpayClient:
                 f"{str(payload)[:300]}"
             )
         return payload
+
+    INVOICE_PAGE_SIZE = 100
+
+    def fetch_overdue_invoices(self, days_overdue_min: int = 1) -> list:
+        """Fetches every unpaid Razorpay invoice overdue by at least `days_overdue_min` days.
+
+        Pages through GET /v1/invoices (Razorpay caps a page at 100 items),
+        filtering out `status == "paid"` and invoices whose due date (see
+        invoice_due_date()) hasn't yet crossed the cutoff. Returns raw
+        Razorpay invoice dicts — mapping onto the internal schema is the
+        caller's job, same division as the CSV upload path.
+        """
+        cutoff = int(time.time()) - days_overdue_min * 86400
+        overdue = []
+        skip = 0
+
+        while True:
+            try:
+                response = httpx.get(
+                    f"{self.BASE_URL}/invoices",
+                    headers=self.headers,
+                    params={"count": self.INVOICE_PAGE_SIZE, "skip": skip},
+                    timeout=15.0
+                )
+            except httpx.RequestError as e:
+                raise ServerError(f"Razorpay invoice list request failed: {e}") from e
+
+            if response.status_code == 401:
+                raise AuthenticationError(
+                    "Razorpay rejected the provided credentials (401) — check "
+                    "RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET"
+                )
+            if response.status_code == 429:
+                raise RateLimitError("Razorpay rate limit hit")
+            if response.status_code >= 500:
+                raise ServerError(f"Razorpay server error: {response.status_code}")
+            if response.status_code >= 400:
+                raise ValueError(
+                    f"Razorpay API error {response.status_code}: {response.text[:500]}"
+                )
+
+            try:
+                payload = response.json()
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Razorpay invoice list response was not valid JSON: {e}") from e
+
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if items is None:
+                raise ValueError(
+                    f"Razorpay invoice list response had no 'items' field: {str(payload)[:300]}"
+                )
+
+            for inv in items:
+                if not isinstance(inv, dict) or inv.get("status") == "paid":
+                    continue
+                due_date = invoice_due_date(inv)
+                if due_date is None or due_date >= cutoff:
+                    continue
+                overdue.append(inv)
+
+            if len(items) < self.INVOICE_PAGE_SIZE:
+                break
+            skip += self.INVOICE_PAGE_SIZE
+
+        return overdue
