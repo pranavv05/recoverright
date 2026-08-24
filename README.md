@@ -38,6 +38,8 @@ RecoverRight is an autonomous B2B receivables recovery agent that processes a ba
 
 ## Architecture
 
+![RecoverRight Architecture](architecture.png)
+
 ```
 Batch of overdue invoices
         │
