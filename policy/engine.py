@@ -90,29 +90,59 @@ def detect_injection(client_notes: str) -> str:
     return _matches(client_notes, INJECTION_PATTERNS)
 
 
+def _spans(text: str, patterns: list) -> list:
+    """Every (start, end) span in `text` matched by any pattern in `patterns`."""
+    return [
+        match.span()
+        for pattern in patterns
+        for match in pattern.finditer(text)
+    ]
+
+
+def _first_uncancelled(text: str, patterns: list, cancelling: list) -> str:
+    """First match of `patterns` that is not swallowed by a `cancelling` match.
+
+    A cue only counts when *that occurrence* of it survives. A note can deny
+    one dispute and raise another in the same sentence ("not disputing the
+    amount, but the goods arrived damaged"), or use an ambiguous word in both
+    senses ("we advocate for prompt payment, but our advocate has written to
+    you") — so the decision has to be made per occurrence, on position.
+
+    An earlier revision compared *matched text* instead of position and
+    excluded the hit itself from the corroboration search. That silently
+    suppressed a genuine threat whenever a benign phrasing appeared anywhere
+    in the same note: "we advocate for timely payment, but our attorney has
+    advised us to hold" returned no legal hit at all, and "we are not
+    disputing the amount, we are disputing the freight" returned no dispute.
+    Both are false negatives on a real hard-stop, which is the one direction
+    this engine must never fail in.
+    """
+    if not text:
+        return ""
+    cancelled = _spans(text, cancelling)
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            start, end = match.span()
+            # Only a cue fully inside a cancelling phrase is cancelled: the
+            # negation "not in dispute" contains the cue "dispute", and the
+            # false-positive reading "advocate for" contains "advocate".
+            if any(c_start <= start and end <= c_end for c_start, c_end in cancelled):
+                continue
+            return match.group(0)
+    return ""
+
+
 def detect_legal(client_notes: str) -> str:
     """Returns the matched legal-threat phrase, or "" if none.
 
     "advocate" and "counsel" are ambiguous words — each has a common
     non-legal verb sense ("advocate for timely payment", "counsel your
-    team"). The LEGAL_PATTERNS regex already excludes the adjacent-verb form
-    via negative lookahead; this second check exists for the cases the
-    lookahead's fixed-width assumption misses, using the same
-    deny-unless-corroborated logic as detect_dispute(): a false-positive
-    reading only suppresses the hit when nothing else in the note
-    independently signals a legal threat.
+    team"). LEGAL_PATTERNS excludes the adjacent-verb form via negative
+    lookahead; LEGAL_FALSE_POSITIVE_PATTERNS is the second signal, applied
+    per occurrence so a benign use elsewhere in the note cannot mask a real
+    one.
     """
-    hit = _matches(client_notes, LEGAL_PATTERNS)
-    if not hit:
-        return ""
-    if _matches(client_notes, LEGAL_FALSE_POSITIVE_PATTERNS):
-        remaining = [
-            pattern for pattern in LEGAL_PATTERNS
-            if pattern.search(client_notes) and pattern.search(client_notes).group(0) != hit
-        ]
-        if not remaining:
-            return ""
-    return hit
+    return _first_uncancelled(client_notes, LEGAL_PATTERNS, LEGAL_FALSE_POSITIVE_PATTERNS)
 
 
 def detect_dispute(client_notes: str) -> str:
@@ -121,21 +151,11 @@ def detect_dispute(client_notes: str) -> str:
     A dispute cue that is explicitly negated ("this one is not in dispute at
     all", "no objection to the amount") does not count. Substring matching
     without this check produced a false REQUIRE_HUMAN on any note that
-    mentioned a dispute only to deny one.
+    mentioned a dispute only to deny one — but the negation cancels only the
+    cue it actually negates, so a note that denies one dispute while raising
+    another still escalates.
     """
-    hit = _matches(client_notes, DISPUTE_PATTERNS)
-    if not hit:
-        return ""
-    if _matches(client_notes, DISPUTE_NEGATION_PATTERNS):
-        # A note can both deny one dispute and raise another. Only treat the
-        # negation as decisive when it is the *only* dispute signal present.
-        remaining = [
-            pattern for pattern in DISPUTE_PATTERNS
-            if pattern.search(client_notes) and pattern.search(client_notes).group(0) != hit
-        ]
-        if not remaining:
-            return ""
-    return hit
+    return _first_uncancelled(client_notes, DISPUTE_PATTERNS, DISPUTE_NEGATION_PATTERNS)
 
 
 def evaluate(inp: PolicyInput) -> PolicyDecision:

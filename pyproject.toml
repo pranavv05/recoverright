@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["tests", "policy", "execution", "evaluation", "."]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "db: marks tests that require a live Postgres connection",
+    "llm: marks tests that make real LLM API calls (skipped without NVIDIA_API_KEY)",
+]
+filterwarnings = ["ignore::DeprecationWarning"]

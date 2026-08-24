@@ -263,6 +263,20 @@ INJECTION_PATTERNS = _compile([
     # state forgery — instructing the system to record an outcome that did not happen
     r"\b(mark|record|treat|set|flag|update|close)\b[\s\S]{0,40}?"
     r"\b(as\s+)?(paid|settled|cleared|closed|complete|completed|resolved|waived|written\s+off)\b",
+    # …and the counterfactual phrasing of the same attack. "Mark this as paid"
+    # and "pretend this has been paid" ask for the identical forged outcome;
+    # only the verb family differs, so this is listed as a family rather than
+    # as the single phrase that exposed the gap.
+    r"\b(pretend|imagine|assume|suppose|act\s+as\s+if|make\s+it\s+look\s+like)\b"
+    r"[\s\S]{0,50}?\b(paid|settled|cleared|closed|resolved|waived|written\s+off)\b",
+    # Override by erasure rather than by instruction — "reset", "clear",
+    # "wipe" aimed at the agent's own state rather than at the invoice's
+    # balance. Deliberately scoped to agent-state objects so an ordinary
+    # "please clear the outstanding balance" cannot match.
+    r"\b(reset|clear|wipe|erase|flush|purge|reinitialis\w+|reinitializ\w+)\b"
+    r"[\s\S]{0,40}?\b(flag|flags|state|memory|context|session|history|rule|rules|"
+    r"check|checks|guardrail\w*|restriction\w*|instruction\w*|system)\b",
+    r"\b(system|factory|context)\s+reset\b",
     r"\b(waive|write\s+off|cancel)\s+(this|the)\s+(invoice|amount|balance|due)\b",
     # exfiltration
     r"\b(reveal|show|share|send|print|repeat|output|reply\s+with)\b[\s\S]{0,40}?"
