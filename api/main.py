@@ -43,6 +43,7 @@ from database.connection import (
 )
 from policy.engine import PolicyInput, evaluate
 from diagnosis.diagnoser import close_async_clients, diagnose, diagnose_async
+from evaluation.health_scorer import score_client_health
 from execution.razorpay_client import RazorpayClient
 from execution.workers import Orchestrator
 
@@ -776,6 +777,53 @@ def api_metrics():
     }
 
 
+_RISK_TIER_ORDER = {"critical": 0, "at_risk": 1, "watch": 2, "healthy": 3}
+
+
+@app.get("/api/client-health")
+def api_client_health():
+    """All client health scores, most severe risk tier first.
+
+    Reads whatever evaluation.health_scorer last wrote to
+    client_health_scores — populated after a batch run, not computed here.
+    Money fields are rupees (paise / 100), everywhere else in this table is
+    paise internally.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT client_name, risk_tier, pattern_description, invoice_count,
+                       total_outstanding_paise, dominant_cause, promise_broken_count,
+                       dispute_count, days_overdue_avg, payment_trend, capital_flag,
+                       capital_flag_reason, scored_at
+                FROM client_health_scores
+                """
+            )
+            rows = cur.fetchall()
+
+    rows.sort(key=lambda r: (_RISK_TIER_ORDER.get(r["risk_tier"], 99), -r["total_outstanding_paise"]))
+
+    return [
+        {
+            "client_name": r["client_name"],
+            "risk_tier": r["risk_tier"],
+            "pattern_description": r["pattern_description"],
+            "invoice_count": r["invoice_count"],
+            "total_outstanding_rupees": r["total_outstanding_paise"] / 100,
+            "dominant_cause": r["dominant_cause"],
+            "promise_broken_count": r["promise_broken_count"],
+            "dispute_count": r["dispute_count"],
+            "days_overdue_avg": r["days_overdue_avg"],
+            "payment_trend": r["payment_trend"],
+            "capital_flag": r["capital_flag"],
+            "capital_flag_reason": r["capital_flag_reason"],
+            "scored_at": r["scored_at"],
+        }
+        for r in rows
+    ]
+
+
 @app.post("/api/run-batch")
 async def api_run_batch():
     """Triggers the batch pipeline against data/seen.json, simulated (no real Razorpay calls).
@@ -786,6 +834,12 @@ async def api_run_batch():
     and so contributes to none of the three totals.
     """
     results = await _dispatch_batch_async("data/seen.json", rzp_client=None)
+
+    # Portfolio-level scoring runs once, after every invoice in the batch has
+    # its diagnosis and policy decision on record — never mid-batch, and
+    # never in a way that can change what was just decided above.
+    await asyncio.to_thread(score_client_health)
+
     return {
         "processed": len(results),
         "allow": sum(1 for r in results if r.get("policy_decision") == "ALLOW"),
@@ -888,3 +942,11 @@ if __name__ == "__main__":
     block = sum(1 for r in results if r.get("policy_decision") == "BLOCK")
     human = sum(1 for r in results if r.get("policy_decision") == "REQUIRE_HUMAN")
     print(f"ALLOW: {allow} | BLOCK: {block} | REQUIRE_HUMAN: {human}")
+
+    # Portfolio-level scoring, after every invoice in the batch has a
+    # diagnosis and a policy decision on record.
+    health_scores = score_client_health()
+    print(f"\nScored {len(health_scores)} clients")
+    for tier in ("critical", "at_risk", "watch", "healthy"):
+        count = sum(1 for s in health_scores if s["risk_tier"] == tier)
+        print(f"  {tier.upper()}: {count}")

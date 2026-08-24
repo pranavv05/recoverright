@@ -63,8 +63,8 @@ def insert_invoice(invoice: dict) -> None:
                 INSERT INTO invoices (
                     invoice_id, client_name, amount_paise, outstanding_balance_paise,
                     days_overdue, account_value_tier, scenario_type, true_cause,
-                    client_notes, processed_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    client_notes, client_payment_history, processed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (invoice_id) DO UPDATE SET
                     client_name = EXCLUDED.client_name,
                     amount_paise = EXCLUDED.amount_paise,
@@ -72,6 +72,7 @@ def insert_invoice(invoice: dict) -> None:
                     days_overdue = EXCLUDED.days_overdue,
                     account_value_tier = EXCLUDED.account_value_tier,
                     client_notes = EXCLUDED.client_notes,
+                    client_payment_history = EXCLUDED.client_payment_history,
                     processed_at = EXCLUDED.processed_at
                 """,
                 (
@@ -84,6 +85,7 @@ def insert_invoice(invoice: dict) -> None:
                     invoice["scenario_type"],
                     invoice["true_cause"],
                     invoice.get("client_notes") or "",
+                    json.dumps(invoice.get("client_payment_history") or []),
                     datetime.now(timezone.utc)
                 )
             )
@@ -230,8 +232,8 @@ async def insert_invoice_async(invoice: dict) -> None:
                 INSERT INTO invoices (
                     invoice_id, client_name, amount_paise, outstanding_balance_paise,
                     days_overdue, account_value_tier, scenario_type, true_cause,
-                    client_notes, processed_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    client_notes, client_payment_history, processed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (invoice_id) DO UPDATE SET
                     client_name = EXCLUDED.client_name,
                     amount_paise = EXCLUDED.amount_paise,
@@ -239,6 +241,7 @@ async def insert_invoice_async(invoice: dict) -> None:
                     days_overdue = EXCLUDED.days_overdue,
                     account_value_tier = EXCLUDED.account_value_tier,
                     client_notes = EXCLUDED.client_notes,
+                    client_payment_history = EXCLUDED.client_payment_history,
                     processed_at = EXCLUDED.processed_at
                 """,
                 (
@@ -251,6 +254,7 @@ async def insert_invoice_async(invoice: dict) -> None:
                     invoice["scenario_type"],
                     invoice["true_cause"],
                     invoice.get("client_notes") or "",
+                    json.dumps(invoice.get("client_payment_history") or []),
                     datetime.now(timezone.utc)
                 )
             )
