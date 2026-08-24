@@ -21,12 +21,12 @@ from fastapi.responses import FileResponse
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
-from audit.trail import get_audit_trail, insert_invoice, insert_recovery, log_audit_event
+from audit.trail import get_audit_trail, insert_invoice, log_audit_event
 from database.connection import get_connection
 from policy.engine import PolicyInput, evaluate
 from diagnosis.diagnoser import diagnose
-from execution.actions import execute_action, reconcile_payment
 from execution.razorpay_client import RazorpayClient
+from execution.workers import Orchestrator
 
 load_dotenv()
 
@@ -48,6 +48,12 @@ def build_rzp_client():
     if not key_id or not key_secret:
         return None
     return RazorpayClient(key_id=key_id, key_secret=key_secret)
+
+
+# One orchestrator for the whole process. Constructed at import time rather
+# than per invoice: the five workers it holds are stateless, and a batch of 500
+# invoices should not allocate 2,500 worker objects to route 500 decisions.
+_orchestrator = Orchestrator()
 
 
 def load_dataset(path: str) -> list:
@@ -128,101 +134,33 @@ def process_invoice(invoice: dict, api_key: str, rzp_client=None) -> dict:
         "diagnosis": diagnosis,
     })
 
-    if decision.decision != "ALLOW":
-        # Not acting is itself an outcome and gets its own terminal record.
-        execution_result = {
-            "status": "escalated_to_human" if decision.decision == "REQUIRE_HUMAN" else "blocked",
-            "decision": decision.decision,
-            "reasons": decision.reasons,
-            "queued_for": decision.allowed_actions,
-            "model_recommended": diagnosis.get("recommended_action"),
-        }
-        log_audit_event(invoice_id, "no_autonomous_action", {"execution": execution_result})
-        return {
-            "invoice_id": invoice_id,
-            "diagnosis": diagnosis,
-            "policy_decision": decision.decision,
-            "policy_reasons": decision.reasons,
-            "execution": execution_result,
-        }
+    # Stage 5: Execute via orchestrator.
+    #
+    # Every terminal state is now a worker's responsibility, including the ones
+    # where the system deliberately did nothing. Routing is deterministic and
+    # lives in execution/workers.py; there is no execution branching left here,
+    # so no second code path can reach a customer.
+    execution_result = _orchestrator.execute(
+        invoice=invoice,
+        diagnosis=diagnosis,
+        decision=decision,
+        rzp_client=rzp_client,
+    )
 
-    action = decision.allowed_actions[0] if decision.allowed_actions else "gather_information"
-
-    if not rzp_client:
-        execution_result = {"status": "simulated", "action": action}
-        log_audit_event(invoice_id, "execution_simulated", {"execution": execution_result})
-        return {
-            "invoice_id": invoice_id,
-            "diagnosis": diagnosis,
-            "policy_decision": decision.decision,
-            "policy_reasons": decision.reasons,
-            "execution": execution_result,
-        }
-
-    try:
-        execution_result = execute_action(
-            action=action,
-            invoice=invoice,
-            outstanding_paise=outstanding,
-            rzp_client=rzp_client,
-        )
-    except Exception as e:
-        # execute_action converts every *expected* Razorpay failure into a
-        # status dict, so reaching here means an unexpected defect. Record it
-        # with a traceback and keep the batch moving rather than losing the
-        # remaining invoices, but never let it look like a clean result.
-        log.exception("[%s] unexpected error executing %s", invoice_id, action)
-        execution_result = {
-            "status": "internal_error",
-            "action": action,
-            "error": f"{type(e).__name__}: {e}",
-        }
-        log_audit_event(invoice_id, "execution", {"execution": execution_result})
-        return {
-            "invoice_id": invoice_id,
-            "diagnosis": diagnosis,
-            "policy_decision": decision.decision,
-            "policy_reasons": decision.reasons,
-            "execution": execution_result,
-        }
-
-    if execution_result.get("status") == "link_created":
-        insert_recovery(
-            invoice_id=invoice_id,
-            payment_link_id=execution_result["payment_link_id"],
-            payment_link_url=execution_result["short_url"],
-            amount_requested_paise=execution_result["amount_paise"],
-            status="link_created",
-        )
-        log_audit_event(invoice_id, "payment_link_created", {
-            "action": "create_payment_link",
-            "payment_link_id": execution_result["payment_link_id"],
-            "short_url": execution_result["short_url"],
-        })
-
-        # Reconcile immediately. A freshly created link is essentially never
-        # already paid, so this normally records "pending" — that is the
-        # point. It puts the verification step in the pipeline rather than
-        # only in a demo script, and it is the ONLY place recovery is counted.
-        try:
-            reconciliation = reconcile_payment(
-                rzp_client, invoice_id, execution_result["payment_link_id"]
-            )
-            execution_result["reconciliation"] = reconciliation
-        except Exception as e:
-            log.warning("[%s] reconciliation check failed: %s", invoice_id, e)
-            execution_result["reconciliation"] = {
-                "status": "reconciliation_unavailable",
-                "error": f"{type(e).__name__}: {e}",
-            }
-
-    log_audit_event(invoice_id, "execution", {"execution": execution_result})
+    # Stage 6: Log the execution result. This is the terminal record the
+    # dashboard reads for an invoice's outcome.
+    log_audit_event(invoice_id, "execution_complete", {
+        "worker": execution_result.get("worker"),
+        "status": execution_result.get("status"),
+        "execution": execution_result,
+    })
 
     return {
         "invoice_id": invoice_id,
         "diagnosis": diagnosis,
         "policy_decision": decision.decision,
         "policy_reasons": decision.reasons,
+        "worker": execution_result.get("worker"),
         "execution": execution_result,
     }
 
@@ -486,7 +424,12 @@ def _load_invoice_rows() -> list:
                 """
                 SELECT DISTINCT ON (invoice_id) invoice_id, event_type, execution_result, created_at
                 FROM audit_log
-                WHERE event_type IN ('execution', 'execution_simulated', 'no_autonomous_action')
+                -- 'execution_complete' is the terminal record every invoice
+                -- gets under the orchestrator-workers pipeline. The other three
+                -- are pre-refactor event types, still emitted by the demo
+                -- scripts, kept so an existing audit_log keeps rendering.
+                WHERE event_type IN ('execution_complete', 'execution',
+                                     'execution_simulated', 'no_autonomous_action')
                 ORDER BY invoice_id, created_at DESC, id DESC
                 """
             )

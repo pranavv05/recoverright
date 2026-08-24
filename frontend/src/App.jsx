@@ -213,11 +213,22 @@ function PolicyCell({ invoice }) {
 // from the decision — every terminal state now writes one, including BLOCK and
 // REQUIRE_HUMAN, so the cell shows what was logged rather than what we assume.
 const OUTCOME_LABELS = {
-  escalated_to_human: 'Escalated to human',
+  // Statuses returned by the orchestrator-workers execution layer.
+  escalated: 'Escalated to human',
   blocked: 'Blocked',
+  waiting: 'Waiting — within pattern',
+  draft_created: 'Draft created — not sent',
   simulated: 'Simulated',
   link_created: 'Payment link created',
   duplicate_link_prevented: 'Duplicate link prevented',
+  failed_max_retries: 'Failed — retries exhausted',
+  failed_server_error: 'Failed — Razorpay 5xx',
+  failed_client_error: 'Failed — Razorpay 4xx',
+  failed: 'Failed — unexpected error',
+
+  // Pre-refactor statuses, still produced by the demo scripts and present in
+  // any audit_log written before the refactor.
+  escalated_to_human: 'Escalated to human',
   reminder_simulated: 'Reminder simulated',
   information_gathering_queued: 'Info gathering queued',
   no_action_within_pattern: 'No action — within pattern',
