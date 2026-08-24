@@ -35,7 +35,7 @@ VALID_CAUSES = {
     "legal_threat", "duplicate_invoice", "unknown",
 }
 
-# Valid values for the 8 signals extracted by Call 1. Kept in code as well as
+# Valid values for the signals extracted by Call 1. Kept in code as well as
 # in the prompt so a malformed model response degrades to a safe default
 # instead of reaching the audit trail (and the ReAct reasoning call) as an
 # arbitrary string — the same fail-closed pattern normalise_diagnosis() uses.
@@ -54,6 +54,15 @@ CONTENT_SIGNALS = {
 DAYS_OVERDUE_BUCKETS = {"1-15", "16-30", "31-60", "60+"}
 ACCOUNT_SENSITIVITY_LEVELS = {"standard", "high_value", "strategic"}
 PAYMENT_LINK_SIGNAL_STATUSES = {"expired_confirmed", "active", "none", "unknown"}
+
+# Granular signals added to give Call 2 more precise inputs than a single
+# broad category — see diagnosis/prompts.py for the differentiators each one
+# is meant to support.
+HISTORY_TRENDS = {"improving", "stable", "deteriorating", "insufficient_data"}
+LATENESS_CONSISTENCY_LEVELS = {"consistent_same_amount", "irregular", "not_applicable"}
+SPECIFIC_CLAIM_TYPES = {"quantity", "amount", "quality", "none"}
+WILLINGNESS_TO_PAY_LEVELS = {"unconditional", "conditional", "refused", "none_expressed"}
+FUTURE_COMMITMENT_TYPES = {"specific_date", "vague_future", "none"}
 
 # The five reasoning-chain keys, in order. Always present in the returned
 # trace, even when the model's output didn't contain that Thought — a
@@ -123,13 +132,16 @@ def _pick(raw: dict, field: str, valid: set, fallback: str) -> tuple:
 
 
 def normalise_signals(raw: dict, invoice: dict) -> dict:
-    """Coerces Call 1's raw signal extraction into the 8-field contract, failing closed.
+    """Coerces Call 1's raw signal extraction into the signal contract, failing closed.
 
     Same philosophy as normalise_diagnosis(): every enum field is validated
     against its whitelist, and an unrecognised value degrades to a safe
-    default rather than reaching Call 2 (or the audit trail) verbatim. Two
+    default rather than reaching Call 2 (or the audit trail) verbatim. Some
     fields have a data-derived fallback instead of a fixed one, because the
-    invoice record already answers them unambiguously.
+    invoice record already answers them unambiguously — `notes_empty` is
+    computed from the invoice directly rather than trusted from the model at
+    all, since it is a fact the model has no reason to ever get wrong, and
+    Call 2's evidence-tier calibration leans on it being reliable.
     """
     invoice_id = invoice.get("invoice_id", "?")
     if not isinstance(raw, dict):
@@ -154,6 +166,18 @@ def normalise_signals(raw: dict, invoice: dict) -> dict:
         raw, "payment_link_status", PAYMENT_LINK_SIGNAL_STATUSES, "unknown"
     )
 
+    history_trend, history_trend_raw = _pick(raw, "history_trend", HISTORY_TRENDS, "insufficient_data")
+    lateness_consistency, lateness_consistency_raw = _pick(
+        raw, "lateness_consistency", LATENESS_CONSISTENCY_LEVELS, "not_applicable"
+    )
+    specific_claim, specific_claim_raw = _pick(raw, "specific_claim", SPECIFIC_CLAIM_TYPES, "none")
+    willingness, willingness_raw = _pick(
+        raw, "willingness_to_pay", WILLINGNESS_TO_PAY_LEVELS, "none_expressed"
+    )
+    future_commitment, future_commitment_raw = _pick(
+        raw, "future_commitment", FUTURE_COMMITMENT_TYPES, "none"
+    )
+
     signals = {
         "engagement_signal": engagement,
         "payment_history_pattern": history,
@@ -163,6 +187,14 @@ def normalise_signals(raw: dict, invoice: dict) -> dict:
         "account_sensitivity": sensitivity,
         "payment_link_status": link_status,
         "evidence_available": bool(raw.get("evidence_available")),
+        "history_trend": history_trend,
+        "sudden_change_from_reliable": bool(raw.get("sudden_change_from_reliable")),
+        "lateness_consistency": lateness_consistency,
+        "specific_claim": specific_claim,
+        "willingness_to_pay": willingness,
+        "future_commitment": future_commitment,
+        "technical_issue_mentioned": bool(raw.get("technical_issue_mentioned")),
+        "notes_empty": not bool((invoice.get("client_notes") or "").strip()),
     }
 
     coerced = {
@@ -174,6 +206,11 @@ def normalise_signals(raw: dict, invoice: dict) -> dict:
             ("days_overdue_bucket", bucket_raw),
             ("account_sensitivity", sensitivity_raw),
             ("payment_link_status", link_status_raw),
+            ("history_trend", history_trend_raw),
+            ("lateness_consistency", lateness_consistency_raw),
+            ("specific_claim", specific_claim_raw),
+            ("willingness_to_pay", willingness_raw),
+            ("future_commitment", future_commitment_raw),
         )
         if value is not None
     }
@@ -458,7 +495,7 @@ def _extract_signals(invoice: dict, api_key: str) -> dict:
         client, invoice_id,
         system_prompt=SIGNAL_EXTRACTION_SYSTEM_PROMPT,
         user_message=user_message,
-        max_tokens=500,
+        max_tokens=700,
         json_mode=True,
         call_label="signal extraction",
         parse_fn=_extract_json,
@@ -691,7 +728,7 @@ async def _extract_signals_async(invoice: dict, api_key: str) -> dict:
         client, invoice_id,
         system_prompt=SIGNAL_EXTRACTION_SYSTEM_PROMPT,
         user_message=user_message,
-        max_tokens=500,
+        max_tokens=700,
         json_mode=True,
         call_label="signal extraction",
         parse_fn=_extract_json,
