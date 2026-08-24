@@ -43,6 +43,7 @@ from database.connection import (
 )
 from policy.engine import PolicyInput, evaluate
 from diagnosis.diagnoser import close_async_clients, diagnose, diagnose_async
+from evaluation.analytics import compute_batch_analytics
 from evaluation.health_scorer import score_client_health
 from execution.razorpay_client import RazorpayClient
 from execution.workers import Orchestrator
@@ -822,6 +823,18 @@ def api_client_health():
         }
         for r in rows
     ]
+
+
+@app.get("/api/analytics")
+def api_analytics():
+    """Batch-level analytics: recovery rate by scenario, most-fired policy
+    rules, multi-invoice clients, and average overdue by diagnosed cause.
+
+    Read-only — computed entirely in SQL/Python from invoices and audit_log,
+    same tables /api/invoices and /api/client-health already read. Nothing
+    here is written back.
+    """
+    return compute_batch_analytics()
 
 
 @app.post("/api/run-batch")
