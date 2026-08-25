@@ -363,7 +363,7 @@ first-match-wins in this order:
 4. Documentation blocker (client waiting on a GST invoice, e-way bill, TDS certificate)
 5. Self-declared ambiguity in the evidence ("could be X or just another excuse")
 6. Broken payment commitment (a promise to pay, and evidence it lapsed — both read from `client_notes`)
-7. Repeated non-answer across reminder cycles (the same stalling response quoted more than once)
+7. Repeated non-answer across reminder cycles — the same stalling response quoted more than once, or a standing non-answer that carries the repetition implicitly ("never responds", "no need to keep following up")
 8. High-risk diagnosed cause (`promise_broken`, `deliberate_stall`)
 9. Account sensitivity (strategic/high-value → human approval)
 10. Financial invariants (amount > 0, outstanding ≥ 0, outstanding ≤ amount, requested ≤ outstanding, no duplicate link)
