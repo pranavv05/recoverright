@@ -17,9 +17,19 @@ The suite is deliberately three-sided:
     telling us to proceed, not a dispute.
 """
 
+import itertools
+import json
+import os
+
 import pytest
 
-from policy.engine import detect_dispute, detect_injection, detect_legal, evaluate
+from policy.engine import (
+    PolicyInput,
+    detect_dispute,
+    detect_injection,
+    detect_legal,
+    evaluate,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -335,14 +345,6 @@ def test_every_hard_stop_invoice_in_the_corpus_blocks():
 # fails this test and asks for the list to be narrowed, and opening a new one
 # fails it too.
 # ─────────────────────────────────────────────────────────────────────────
-
-import itertools
-import json
-import os
-
-import pytest
-
-from policy.engine import PolicyInput, evaluate
 
 BENIGN_CAUSES = ["forgotten_invoice", "payment_link_failure", "chronic_late_payer",
                  "wrong_contact", "cash_flow_delay", "unknown"]

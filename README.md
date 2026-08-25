@@ -340,8 +340,10 @@ python -m pytest policy/test_engine.py -v \
 ```
 
 This checks both required properties: adversarial injection/legal phrasing is
-blocked and benign phrasing is not falsely classified. The full 115-test suite
-also runs those cases along with real-record and whole-corpus checks.
+blocked and benign phrasing is not falsely classified. `tests/test_policy_adversarial.py`
+(110 tests) carries the same three-sided check on phrases written for that file
+and appearing nowhere in `data/`, plus the whole-corpus worst-case sweep
+described in § Policy Engine.
 
 What can honestly be claimed: the held-out **labels** were never used to tune
 anything, and diagnosis quality (`cause_accuracy`, `evidence_tier_accuracy`)
@@ -630,7 +632,7 @@ recoverright/
   policy/
     engine.py            # Deterministic policy evaluator
     rules.py             # Thresholds, action whitelists, content patterns
-    test_engine.py       # __TEST_COUNT__ unit tests — invariants, adversarial content,
+    test_engine.py       # 131 unit tests — invariants, adversarial content,
                          # real dataset fixtures, whole-corpus properties
   docker-compose.yml
   requirements.txt

@@ -188,13 +188,6 @@ def test_llm_semaphore_caps_concurrency_at_the_configured_limit(no_pacing):
 
 def test_llm_semaphore_queues_the_excess_rather_than_dropping_it(no_pacing):
     """The calls beyond the limit wait their turn; none is skipped or lost."""
-    # The pacer bounds requests *started* per second; with instant fakes it
-    # would keep them from ever overlapping and leave the semaphore — the
-    # thing under test — unexercised. Pacing is asserted separately.
-    monkeypatch.setattr(diagnoser, "MIN_REQUEST_INTERVAL_SECONDS", 0.0)
-    monkeypatch.setattr(diagnoser, "_request_interval", 0.0)
-    monkeypatch.setattr(diagnoser, "_next_slot_at", 0.0)
-    monkeypatch.setattr(diagnoser, "_cooldown_until", 0.0)
     recorder = ConcurrencyRecorder()
     client = FakeClient(recorder)
 
