@@ -286,3 +286,72 @@ def test_recovered_amount_is_zero_unless_payment_is_verified(require_database):
             )
             offenders = cur.fetchall()
     assert offenders == [], f"unverified rows carrying a recovered amount: {offenders}"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Source-level guard
+#
+# The `/api/client-health` endpoint once emitted `total_outstanding_paise /
+# 100`. In Python 3 that is true division, so a money value left the API as a
+# binary float — and it survived every review that grepped for `float(`,
+# because there is no `float(` in `x / 100`. A reviewer cannot be relied on to
+# spot the absence of a character, so the rule is asserted over the source.
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_no_module_converts_paise_with_true_division():
+    """No money value is divided by a unit constant anywhere in the package.
+
+    Scoped precisely to the bug class. `paise / 100` is a *unit conversion*
+    that turns an exact integer amount into a binary float, and that is
+    forbidden — use `//`, or format at the display edge. Dividing money by
+    money (`recovered_paise / outstanding_paise`) is a different thing: the
+    result is a dimensionless rate, and a float is the correct type for it.
+    The two are told apart by the right-hand operand — a numeric literal means
+    a unit conversion, a name means a ratio.
+
+    Walks the AST rather than matching text, so a comment mentioning
+    `paise / 100` cannot fail the test and a wrapped line cannot escape it.
+    """
+    import ast
+    import pathlib
+
+    MONEY = ("paise", "amount", "outstanding", "balance", "recovered", "requested")
+    root = pathlib.Path(__file__).resolve().parent.parent
+    offenders = []
+
+    def names_in(node):
+        """Every identifier and string key appearing anywhere under `node`."""
+        found = []
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name):
+                found.append(sub.id)
+            elif isinstance(sub, ast.Attribute):
+                found.append(sub.attr)
+            elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                found.append(sub.value)
+        return found
+
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith((".venv/", "tests/")) or "__pycache__" in rel:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)):
+                continue
+            divisor = node.right
+            is_unit_constant = (
+                isinstance(divisor, ast.Constant)
+                and isinstance(divisor.value, (int, float))
+                and not isinstance(divisor.value, bool)
+            )
+            if not is_unit_constant:
+                continue
+            haystack = " ".join(names_in(node.left)).lower()
+            if any(token in haystack for token in MONEY):
+                offenders.append(f"{rel}:{node.lineno}")
+
+    assert not offenders, (
+        "a money value is divided by a unit constant, which makes it a binary "
+        f"float; use `//` or convert only at the display edge: {offenders}"
+    )

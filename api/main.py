@@ -957,8 +957,13 @@ def api_client_health():
 
     Reads whatever evaluation.health_scorer last wrote to
     client_health_scores — populated after a batch run, not computed here.
-    Money fields are rupees (paise / 100), everywhere else in this table is
-    paise internally.
+
+    Money is emitted as integer paise, like every other endpoint. An earlier
+    revision returned `total_outstanding_rupees` as `paise / 100`, and in
+    Python 3 that is true division: the one place in this codebase where a
+    money value became a binary float, at the API boundary where it is
+    hardest to notice. It survived a `float(` grep precisely because there is
+    no `float(` in it. Formatting for display is the dashboard's job.
     """
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -981,7 +986,7 @@ def api_client_health():
             "risk_tier": r["risk_tier"],
             "pattern_description": r["pattern_description"],
             "invoice_count": r["invoice_count"],
-            "total_outstanding_rupees": r["total_outstanding_paise"] / 100,
+            "total_outstanding_paise": r["total_outstanding_paise"],
             "dominant_cause": r["dominant_cause"],
             "promise_broken_count": r["promise_broken_count"],
             "dispute_count": r["dispute_count"],

@@ -252,10 +252,29 @@ def test_client_health_rows_carry_the_scoring_fields(client_health):
     if not rows:
         pytest.skip("client health has not been scored yet")
     for field in ("client_name", "risk_tier", "pattern_description", "invoice_count",
-                  "total_outstanding_rupees", "dominant_cause", "promise_broken_count",
+                  "total_outstanding_paise", "dominant_cause", "promise_broken_count",
                   "dispute_count", "days_overdue_avg", "payment_trend",
                   "capital_flag", "capital_flag_reason"):
         assert field in rows[0], f"/api/client-health row is missing {field!r}"
+
+
+def test_client_health_money_is_integer_paise_not_float_rupees(client_health):
+    """Money leaves this API as integer paise, on every endpoint without exception.
+
+    This row used to be emitted as `paise / 100`, which in Python 3 is true
+    division — a binary float carrying a money value across the API boundary.
+    It is the one such case the codebase had, and it was invisible to a
+    `float(` search because the call does not appear in it.
+    """
+    if not client_health:
+        pytest.skip("client health has not been scored yet")
+    for row in client_health:
+        value = row["total_outstanding_paise"]
+        assert isinstance(value, int) and not isinstance(value, bool), (
+            f"{row['client_name']}: total_outstanding_paise is "
+            f"{type(value).__name__}, not int"
+        )
+        assert value >= 0, f"{row['client_name']}: negative outstanding {value}"
 
 
 def test_client_health_risk_tiers_are_from_the_documented_set(client_health):
