@@ -10,7 +10,6 @@ afterwards (see tests/conftest.py); the project's real batch data is left
 alone. Marked `db` so `-m "not db"` gives a fast, offline run.
 """
 
-import json
 import time
 from datetime import datetime, timezone
 

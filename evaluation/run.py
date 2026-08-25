@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import statistics
+import time
 
 from dotenv import load_dotenv
 
@@ -25,12 +26,24 @@ from evaluation.metrics import compute_metrics
 log = logging.getLogger(__name__)
 
 
+# Seconds to wait before re-attempting an invoice the first pass could not
+# diagnose. Long enough for a per-minute rate-limit window to roll over.
+RETRY_PAUSE_SECONDS = 20.0
+
+
 def run_evaluation(held_out_path: str, api_key: str, rzp_client=None) -> dict:
     """Runs the full pipeline against a ground-truthed set and computes metrics.
 
     Invoices where diagnosis failed are excluded from the accuracy metrics and
     reported separately under "excluded_failures" — a failure is never silently
     folded into an accuracy score.
+
+    A diagnosis that failed is retried once, after a pause, before being
+    excluded. The batch pipeline already sweeps its failures serially; without
+    the same courtesy here a single 429 silently shrinks every denominator on
+    the scorecard, which reads as a quieter, better-looking result than the run
+    actually earned. The retry only ever restores an invoice to the metrics —
+    one that fails twice is still reported as a failure, never scored.
     """
     with open(held_out_path, encoding="utf-8") as f:
         held_out = json.load(f)
@@ -40,6 +53,14 @@ def run_evaluation(held_out_path: str, api_key: str, rzp_client=None) -> dict:
     for i, invoice in enumerate(held_out, start=1):
         log.info("Evaluating %d/%d: %s", i, len(held_out), invoice["invoice_id"])
         result = process_invoice(invoice, api_key, rzp_client)
+
+        if result.get("status") == "diagnosis_failed":
+            log.warning(
+                "[%s] diagnosis failed — retrying once in %.0fs before excluding it",
+                invoice["invoice_id"], RETRY_PAUSE_SECONDS,
+            )
+            time.sleep(RETRY_PAUSE_SECONDS)
+            result = process_invoice(invoice, api_key, rzp_client)
 
         if result.get("status") in ("skipped", "diagnosis_failed"):
             failed.append({"invoice_id": result["invoice_id"], "status": result["status"]})

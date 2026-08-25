@@ -3,7 +3,8 @@
 Five properties, one per thing that could go wrong once fifty-two invoices are
 in flight at once:
 
-    1. the LLM semaphore actually caps concurrency at six
+    1. the LLM semaphore caps in-flight calls, and the pacer caps the rate
+       at which they start — two different limits, both needed
     2. one invoice raising does not take the batch down with it
     3. concurrent writes through the async pool do not tread on each other
     4. a batch of N invoices returns exactly N results
@@ -26,6 +27,7 @@ only way to get a loop psycopg can use on Windows.
 
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -135,11 +137,28 @@ def make_invoice(n: int) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Test 1 — the semaphore caps concurrent LLM calls at six
+# Test 1 — the semaphore caps concurrent LLM calls
 # ─────────────────────────────────────────────────────────────────────────
 
-def test_llm_semaphore_caps_concurrency_at_the_configured_limit():
-    """Twenty simultaneous calls must never put more than six on the wire."""
+@pytest.fixture
+def no_pacing(monkeypatch):
+    """Neutralises the request pacer so a test can observe the semaphore alone.
+
+    The pacer and the semaphore limit different things — requests *started*
+    per second versus requests *in flight* — and with both active the pacer is
+    the binding constraint for the instant fake calls used here: twenty calls
+    spaced 0.4s apart never overlap, so peak concurrency is 1 and the
+    semaphore is never exercised at all. Zeroing the interval isolates the
+    property each test is actually about.
+    """
+    monkeypatch.setattr(diagnoser, "MIN_REQUEST_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(diagnoser, "_request_interval", 0.0)
+    monkeypatch.setattr(diagnoser, "_next_slot_at", 0.0)
+    monkeypatch.setattr(diagnoser, "_cooldown_until", 0.0)
+
+
+def test_llm_semaphore_caps_concurrency_at_the_configured_limit(no_pacing):
+    """Twenty simultaneous calls must never put more than the cap on the wire."""
     recorder = ConcurrencyRecorder()
     client = FakeClient(recorder)
 
@@ -167,7 +186,7 @@ def test_llm_semaphore_caps_concurrency_at_the_configured_limit():
     )
 
 
-def test_llm_semaphore_queues_the_excess_rather_than_dropping_it():
+def test_llm_semaphore_queues_the_excess_rather_than_dropping_it(no_pacing):
     """The calls beyond the limit wait their turn; none is skipped or lost."""
     recorder = ConcurrencyRecorder()
     client = FakeClient(recorder)
@@ -188,6 +207,106 @@ def test_llm_semaphore_queues_the_excess_rather_than_dropping_it():
     assert len(results) == MAX_CONCURRENT_LLM_CALLS * 3
     assert all(r == "some content" for r in results)
     assert recorder.current == 0, "every slot should have been released"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Test 1b — the request pacer
+#
+# The semaphore alone was not enough. A 52-invoice batch stayed under a
+# six-in-flight cap and still had fourteen invoices exhaust a six-attempt
+# retry budget on 429s, because a concurrency cap does not bound the rate at
+# which requests *start*. These pin the mechanism that fixed it.
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_pacer_spaces_request_starts_by_the_configured_interval():
+    """N slots take at least (N-1) intervals — the rate limit's actual unit."""
+    interval = 0.05
+    n = 6
+
+    async def scenario():
+        diagnoser.reset_rate_limit_state()
+        diagnoser._request_interval = interval
+        start = time.monotonic()
+        await asyncio.gather(*(diagnoser._acquire_pace_slot() for _ in range(n)))
+        return time.monotonic() - start
+
+    elapsed = run(scenario())
+    assert elapsed >= interval * (n - 1) * 0.8, (
+        f"{n} slots took {elapsed:.3f}s — the pacer is not spacing request starts"
+    )
+
+
+def test_pacer_widens_on_rate_limit_and_recovers_on_success():
+    """Multiplicative increase, geometric decay — and never past its bounds."""
+    diagnoser.reset_rate_limit_state()
+    baseline = diagnoser._request_interval
+
+    diagnoser.note_rate_limited()
+    widened = diagnoser._request_interval
+    assert widened > baseline, "a 429 must slow the batch down"
+
+    # Decay is gated on a run of clean responses, not a single one.
+    for _ in range(diagnoser._SUCCESSES_BEFORE_SPEEDUP):
+        diagnoser.note_request_succeeded()
+    assert diagnoser._request_interval < widened, "sustained success must speed back up"
+
+    for _ in range(200):
+        diagnoser.note_rate_limited()
+    assert diagnoser._request_interval <= diagnoser.MAX_REQUEST_INTERVAL_SECONDS
+
+    for _ in range(2000):
+        diagnoser.note_request_succeeded()
+    assert diagnoser._request_interval >= diagnoser.MIN_REQUEST_INTERVAL_SECONDS
+
+    diagnoser.reset_rate_limit_state()
+
+
+def test_backoff_is_jittered_so_a_synchronised_herd_does_not_retry_together():
+    """The property that actually broke the batch.
+
+    With a bare `2 ** attempt`, fifty-two tasks that were rate limited at the
+    same instant sleep for the identical interval and collide again on every
+    retry. Distinct delays are the fix, so distinctness is what is asserted.
+    """
+    delays = {diagnoser._backoff_delay(3) for _ in range(50)}
+    assert len(delays) > 25, "backoff is not jittered — retries will collide"
+    cap = diagnoser.BACKOFF_BASE_SECONDS * (2 ** 2)
+    assert all(0 <= d <= cap for d in delays), "jittered delay escaped its cap"
+
+
+def test_backoff_honours_a_server_retry_after_header():
+    """When the server says how long to wait, that is a floor, not a hint."""
+
+    class FakeResponse:
+        headers = {"retry-after": "7"}
+
+    class FakeError(Exception):
+        response = FakeResponse()
+
+    assert diagnoser._retry_after_seconds(FakeError()) == 7.0
+    assert diagnoser._backoff_delay(1, retry_after=7.0) >= 7.0
+
+    class NoHeaders(Exception):
+        response = None
+
+    assert diagnoser._retry_after_seconds(NoHeaders()) == 0.0
+
+
+def test_cooldown_from_one_task_is_observed_by_every_other_task():
+    """A 429 is information about the shared endpoint, not about one invoice."""
+
+    async def scenario():
+        diagnoser.reset_rate_limit_state()
+        diagnoser._open_cooldown(0.15)
+        start = time.monotonic()
+        await asyncio.gather(*(diagnoser._await_cooldown() for _ in range(4)))
+        return time.monotonic() - start
+
+    elapsed = run(scenario())
+    diagnoser.reset_rate_limit_state()
+    assert elapsed >= 0.15, (
+        f"tasks resumed after {elapsed:.3f}s — one task's 429 did not hold the others back"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -142,6 +142,12 @@ class PaymentLinkWorker:
     """
 
     def execute(self, invoice, diagnosis, decision, rzp_client=None):
+        """Creates the payment link, records it, and immediately tries to reconcile.
+
+        Returns the execution dict the audit trail stores. Link creation credits
+        nothing: `amount_recovered_paise` stays 0 until reconcile_payment() sees
+        Razorpay report the link as paid.
+        """
         invoice_id = invoice["invoice_id"]
         outstanding = _outstanding_paise(invoice)
 
@@ -374,7 +380,6 @@ class PaymentLinkWorker:
             })
             return {"status": "pending"}
 
-
     def _failure(self, invoice_id, status, reason, exc, outstanding):
         """Writes one worker_failed event and returns the matching result dict."""
         error = f"{type(exc).__name__}: {exc}"
@@ -434,6 +439,11 @@ class EscalationWorker:
     """
 
     def execute(self, invoice, diagnosis, decision, rzp_client=None):
+        """Records a prioritised human-review handoff. Takes no customer-facing action.
+
+        Priority comes from the policy reasons, not the invoice value, so a
+        security or legal reason outranks a large but ordinary balance.
+        """
         invoice_id = invoice["invoice_id"]
         priority = self._determine_priority(decision.reasons)
 
@@ -490,7 +500,6 @@ class EscalationWorker:
 
         return execution
 
-
     def _determine_priority(self, reasons):
         """Most severe reason wins. Unmapped reasons contribute LOW."""
         best = "LOW"
@@ -522,6 +531,11 @@ class BlockWorker:
     """
 
     def execute(self, invoice, diagnosis, decision, rzp_client=None):
+        """Records a refusal and why, and contacts nobody.
+
+        The block_type distinguishes a security stop from a legal or financial
+        one so the audit trail says which guardrail fired.
+        """
         invoice_id = invoice["invoice_id"]
 
         block_type = "standard"
@@ -577,7 +591,6 @@ class BlockWorker:
         return execution
 
 
-
 # ─────────────────────────────────────────────────────────────────────────
 # Worker 4 — wait
 # ─────────────────────────────────────────────────────────────────────────
@@ -591,6 +604,11 @@ class WaitWorker:
     """
 
     def execute(self, invoice, diagnosis, decision, rzp_client=None):
+        """Schedules a future re-check without contacting the client now.
+
+        The deliberate non-action: recorded as an event so "we chose to wait"
+        is distinguishable in the audit trail from "nothing happened".
+        """
         invoice_id = invoice["invoice_id"]
 
         history = invoice.get("client_payment_history") or []
@@ -642,7 +660,6 @@ class WaitWorker:
         return execution
 
 
-
 # ─────────────────────────────────────────────────────────────────────────
 # Worker 5 — information
 # ─────────────────────────────────────────────────────────────────────────
@@ -656,6 +673,11 @@ class InformationWorker:
     """
 
     def execute(self, invoice, diagnosis, decision, rzp_client=None):
+        """Drafts an information-gathering message and queues it for review.
+
+        Drafts only — nothing is sent. The draft is stored so a human can see
+        what the system would have asked before anyone approves it.
+        """
         invoice_id = invoice["invoice_id"]
         draft = self._draft_diagnostic_message(invoice, diagnosis)
 
@@ -699,7 +721,6 @@ class InformationWorker:
         })
 
         return execution
-
 
     def _draft_diagnostic_message(self, invoice, diagnosis):
         """Deliberately neutral copy — it must be safe to send under any cause.
@@ -801,6 +822,11 @@ class Orchestrator:
         return "escalation"
 
     def execute(self, invoice, diagnosis, decision, rzp_client=None):
+        """Routes to the worker `route()` selects, logs the routing, and runs it.
+
+        The routing event is written before the worker runs, so a worker that
+        raises still leaves a record of what was chosen and why.
+        """
         worker_name = self.route(invoice, diagnosis, decision)
         worker = self._workers[worker_name]
 

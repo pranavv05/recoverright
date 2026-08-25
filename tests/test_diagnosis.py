@@ -468,7 +468,7 @@ def test_diagnose_async_returns_the_same_contract_as_diagnose(monkeypatch, invoi
     assert "_signals" in result
 
 
-def test_diagnose_semaphore_limits_concurrency_to_six(monkeypatch, sample_invoice):
+def test_diagnose_semaphore_limits_concurrency_to_the_configured_cap(monkeypatch, sample_invoice):
     """Ten invoices in flight must never put more than MAX_CONCURRENT_LLM_CALLS on the wire.
 
     NVIDIA NIM's free tier will not take fifty-two simultaneous requests. The
@@ -486,6 +486,13 @@ def test_diagnose_semaphore_limits_concurrency_to_six(monkeypatch, sample_invoic
         lambda api_key: FakeClient(responder, is_async=True, delay=0.02, tracker=tracker),
     )
     monkeypatch.setattr(diagnoser, "INTRA_DIAGNOSIS_DELAY_SECONDS", 0)
+    # Neutralise the request pacer: it bounds requests *started* per second,
+    # which for 20ms fake calls would keep them from ever overlapping and so
+    # would leave the semaphore — the thing under test here — unexercised.
+    monkeypatch.setattr(diagnoser, "MIN_REQUEST_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(diagnoser, "_request_interval", 0.0)
+    monkeypatch.setattr(diagnoser, "_next_slot_at", 0.0)
+    monkeypatch.setattr(diagnoser, "_cooldown_until", 0.0)
 
     async def run_ten():
         invoices = [dict(sample_invoice, invoice_id=f"INV-{n}") for n in range(10)]

@@ -142,6 +142,15 @@ python -m api.main
 # ...or against real Razorpay test-mode APIs
 python -m api.main --live
 
+# To see the same-client / different-outcome case on the dashboard, run the
+# full corpus instead. INV-1089 and INV-1090 belong to one client, Sahyadri
+# Precision Auto: 1089 is a disputed hard stop and blocks, 1090 is a plain
+# expired link on the same account and is actioned autonomously. They live in
+# held_out.json, so the default seen.json batch leaves the Analytics tab's
+# "Multi-Invoice Clients" panel empty — the judgment is per invoice, not per
+# client, and this is the batch that shows it.
+python -m api.main --dataset data/all_invoices.json
+
 # Policy engine unit tests — no database or API keys needed
 python -m pytest policy/test_engine.py -v
 
@@ -329,7 +338,7 @@ python -m pytest policy/test_engine.py -v \
 ```
 
 This checks both required properties: adversarial injection/legal phrasing is
-blocked and benign phrasing is not falsely classified. The full 94-test suite
+blocked and benign phrasing is not falsely classified. The full 115-test suite
 also runs those cases along with real-record and whole-corpus checks.
 
 What can honestly be claimed: the held-out **labels** were never used to tune
@@ -349,24 +358,45 @@ first-match-wins in this order:
 3. Unverified off-platform payment claim (NEFT/IMPS/UPI/cheque) → verify before collecting
 4. Documentation blocker (client waiting on a GST invoice, e-way bill, TDS certificate)
 5. Self-declared ambiguity in the evidence ("could be X or just another excuse")
-6. High-risk diagnosed cause (`promise_broken`, `deliberate_stall`)
-7. Account sensitivity (strategic/high-value → human approval)
-8. Financial invariants (amount > 0, outstanding ≥ 0, outstanding ≤ amount, requested ≤ outstanding, no duplicate link)
-9. Action and evidence-tier whitelists — anything unrecognised fails closed to REQUIRE_HUMAN
-10. Evidence tier (unknown → cannot trigger autonomous action)
-11. Severity (days overdue, reminder fatigue)
-12. ALLOW if nothing fired
+6. Unfulfilled prior commitment / repeated stall, read from the notes themselves
+7. High-risk diagnosed cause (`promise_broken`, `deliberate_stall`)
+8. Account sensitivity (strategic/high-value → human approval)
+9. Financial invariants (amount > 0, outstanding ≥ 0, outstanding ≤ amount, requested ≤ outstanding, no duplicate link)
+10. Action and evidence-tier whitelists — anything unrecognised fails closed to REQUIRE_HUMAN
+11. Evidence tier (unknown → cannot trigger autonomous action)
+12. Severity (days overdue, reminder fatigue)
+13. ALLOW if nothing fired
 
-**On "zero LLM dependency".** Ten of these twelve steps read only merchant and
-invoice data. Two — step 6 (`diagnosed_cause`) and step 10 (`evidence_tier`) —
-read fields the model produced. Both are tightening-only: they can turn an
-ALLOW into a REQUIRE_HUMAN and never the reverse, so a wrong diagnosis costs an
-unnecessary escalation, never an inappropriate action. Every value the model
-returns is checked against a whitelist before it reaches a rule; an
-unrecognised action or tier is treated as an unknown state and routed to a
-human rather than guessed at. Claiming the engine has *zero* LLM dependency
-would be inaccurate — claiming no LLM output can loosen a decision is accurate,
-and is what steps 9–10 enforce.
+**Why step 6 exists.** It is the deterministic twin of step 7, and it was added
+because step 7 alone was not a guarantee. Step 7 reads the model's
+`diagnosed_cause`, so the entire broken-promise class was protected only as
+well as an 8B model classifies. A held-out run found the gap: INV-1048 —
+*"Client said 'processing today' … Still pending, repeated follow-ups
+ignored"* — was ALLOWed because the model diagnosed it as something benign, and
+at 48 days overdue with 4 reminders it sat under both severity thresholds too.
+One inappropriate autonomous action, on exactly the case the system exists to
+escalate. Step 6 now reads the note directly and escalates regardless of what
+the model concluded.
+
+It keys on the *non-fulfilment*, not on the promise. A forward-looking
+commitment is not a risk signal by itself — "let me get it processed today",
+"Will clear shortly" are what a cooperative client says on first contact, and
+those invoices are safe to action. What separates a broken promise from a fresh
+one is the evidence around it that a previous commitment already lapsed: a date
+that passed, a cheque that never came, the same sentence sent for the fourth
+time. Across all 93 corpus invoices the rule fires on 17 and produces **zero**
+false positives on the safe split.
+
+**On "zero LLM dependency".** Eleven of these thirteen steps read only merchant
+and invoice data. Two — step 7 (`diagnosed_cause`) and step 11
+(`evidence_tier`) — read fields the model produced. Both are tightening-only:
+they can turn an ALLOW into a REQUIRE_HUMAN and never the reverse, so a wrong
+diagnosis costs an unnecessary escalation, never an inappropriate action. Every
+value the model returns is checked against a whitelist before it reaches a
+rule; an unrecognised action or tier is treated as an unknown state and routed
+to a human rather than guessed at. Claiming the engine has *zero* LLM
+dependency would be inaccurate — claiming no LLM output can loosen a decision
+is accurate, and is what steps 10–11 enforce.
 
 ### Invariants (always enforced)
 
@@ -498,7 +528,13 @@ This is a buildathon submission, not a production system. Honest gaps:
 - **Simulated customer responses.** Client replies, email opens, and promise-to-pay tracking are synthetic — the system does not actually send emails or track real engagement.
 - **Test-mode payments only.** All Razorpay interactions use test-mode APIs. No real money moves.
 - **No real-time webhook reconciliation.** Payment verification is simulated by polling the test-mode API rather than receiving live webhooks.
-- **NVIDIA NIM rate limits.** The free NVIDIA NIM tier has its own request-per-minute limits; `diagnosis/diagnoser.py` retries with exponential backoff on 429s, but a production deployment would use a paid tier or batch processing for sustained high-volume throughput.
+- **NVIDIA NIM rate limits.** The free NVIDIA NIM tier has request-per-minute limits that a 52-invoice batch (≈104 calls) will hit. `diagnosis/diagnoser.py` handles them with four mechanisms rather than one, because the obvious one is not sufficient on its own:
+  - **Full-jitter backoff.** A bare `2 ** attempt` is what actually broke the batch: tasks rate-limited at the same instant sleep the same interval and collide again on every retry, so all six attempts burn inside a few seconds. Delays are now drawn from `[0, cap]`.
+  - **A shared cooldown.** A 429 is information about the shared endpoint, not about one invoice, so it pauses *every* task's next request instead of only the one that received it.
+  - **An adaptive pacer.** A semaphore caps requests *in flight*; a rate limit counts requests *started* per unit time. Those are different quantities, and a batch can sit under its concurrency cap while well over the rate limit — which is what happened. The pacer bounds the interval between request starts, widening multiplicatively on a 429 and decaying on sustained success (TCP-style), so a batch finds the endpoint's real capacity rather than assuming one.
+  - **A serial sweep.** Anything still undiagnosed after the concurrent pass is retried one at a time, so a transient limit cannot leave the batch partially processed and reporting `n/a`.
+
+  `Retry-After` is honoured as a floor wherever the server sends it. A production deployment would still use a paid tier for sustained high-volume throughput; these make the free tier reliable, not fast.
 - **Pattern-based content detection.** Dispute, legal, injection, and
   documentation-blocker detection are regex families, not a classifier. They
   are tested against out-of-corpus phrasings including transliterated Hindi,
@@ -557,7 +593,7 @@ recoverright/
   policy/
     engine.py            # Deterministic policy evaluator
     rules.py             # Thresholds, action whitelists, content patterns
-    test_engine.py       # 94 unit tests — invariants, adversarial content,
+    test_engine.py       # 115 unit tests — invariants, adversarial content,
                          # real dataset fixtures, whole-corpus properties
   docker-compose.yml
   requirements.txt
@@ -568,39 +604,56 @@ recoverright/
 
 ## Evaluation Results
 
-Mean of three runs of
-`python -m evaluation.run --dataset data/held_out.json --repeat 3`, re-run
-after the C3/C4 content-detection fixes.
+Three independent runs of
+`python -m evaluation.run --dataset data/held_out.json`, measured after the
+step-6 unfulfilled-commitment rule was added.
 
 | Metric | Result | Notes |
 |---|---|---|
 | Held-out invoices | 41 | 27 require a human, 14 safe to action, 5 hard stops |
-| Cause diagnosis accuracy | 57% | range 0.537–0.585 across runs |
-| Evidence tier accuracy | 68% | range 0.659–0.707 |
-| Action accuracy | 57% | range 0.561–0.585 |
+| Cause diagnosis accuracy | 49% | range 45.0–53.7% across runs |
+| Evidence tier accuracy | 36% | range 31.7–42.5% |
+| Action accuracy | 48% | range 41.5–53.7% |
 | Correct block rate | 100% | 5/5 hard stops blocked, all 3 runs |
-| Correct escalation rate | 100% | 27/27 human-required invoices escalated or blocked, all 3 runs |
+| Correct escalation rate | 100% | every human-required invoice escalated or blocked, all 3 runs |
 | **Inappropriate actions** | **0** | no ALLOW on an invoice needing a human, all 3 runs |
-| Over-escalations | 5 | safe invoices the system refused to action, all 3 runs |
-| Safe action rate | 64% | 9 of 14 safe invoices actioned autonomously, all 3 runs |
+| Over-escalations | 4–5 | safe invoices the system refused to action |
+| Safe action rate | 67% | range 64.3–71.4% |
 | Verified recovery amount | ₹0 | no test payment completed in this run; see § What's Real |
 | Recovery rate | n/a | denominator is meaningless at ₹0 recovered |
 
-Metrics are the mean of 3 independent runs. Single-run variance is expected
-due to LLM sampling — in the latest audited three-run sample, evidence-tier
-accuracy ranged 65.9%–70.7% and cause accuracy 53.7%–58.5%. The safety
-metrics (block rate, escalation rate, inappropriate actions, over-escalations,
-safe action rate) were identical in all three, and unchanged from the
-pre-C3/C4-fix run — the diagnosis-accuracy drift above is normal LLM sampling
-noise, not a regression from the policy rewrite.
+**The diagnosis numbers are worse than an earlier revision of this table
+claimed, and the earlier numbers were wrong.** That table quoted 57% cause
+accuracy and 68% evidence-tier accuracy from a stale sample and was never
+re-measured as the corpus and prompts changed; three fresh runs put cause
+accuracy at 49% and evidence-tier accuracy at 36%. The figures above are what
+the code in this repository actually produces. An 8B model is doing
+open-vocabulary classification into eleven causes from a short free-text note,
+and it is not good at it.
+
+That is also the point of the architecture rather than an embarrassment beside
+it: the safety metrics were **unchanged across all three runs** at 0
+inappropriate actions and 100% block and escalation rates, on the same runs
+that produced 36% evidence-tier accuracy. The engine is what holds those
+invariants, and it holds them while the model it depends on is wrong roughly
+half the time. A design whose safety degraded in step with model accuracy would
+have shown it here.
+
+Single-run variance across the accuracy metrics is LLM sampling noise. Run 2
+also excluded one invoice whose diagnosis failed on a rate limit (total 40, not
+41) — `evaluation/run.py` now retries a failed diagnosis once before excluding
+it, so a transient 429 no longer quietly shrinks the denominator.
 
 **Read the two halves together.** Zero inappropriate actions is only meaningful
 next to the over-escalation count: an engine that escalated all 41 invoices
-would also score zero. It escalated 5 safe invoices it should have actioned —
-all five have empty `client_notes`, where the 8B model asserted a confident
-cause from a thin payment history and proposed a reminder. The engine's
-`unsupported_inference_no_client_communication` rule correctly refused. That is
-the intended failure direction, but it is a cost, and it is 36% of the safe set.
+would also score zero. It escalated 4–5 of the 14 safe invoices it should have
+actioned (INV-1017, 1018, 1024, 1031, 1086) — **every one of them has empty
+`client_notes`**, where the 8B model asserted a confident cause from a thin
+payment history alone and proposed a reminder. The engine's
+`unsupported_inference_no_client_communication` rule correctly refused: a
+confidence label the client never corroborated is not evidence. That is the
+intended failure direction, but it is a real cost — roughly a third of the safe
+set — and it is paid on exactly the invoices where there is least to go on.
 
 **Where the errors come from.** Feeding ground-truth diagnoses into the policy
 engine instead of the model's — `test_no_human_required_invoice_is_ever_allowed`

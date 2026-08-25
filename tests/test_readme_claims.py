@@ -18,7 +18,6 @@ offline in well under a second.
 """
 
 import ast
-import json
 import os
 import re
 

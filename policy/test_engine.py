@@ -18,7 +18,7 @@ import os
 
 import pytest
 
-from policy.engine import PolicyInput, evaluate
+from policy.engine import PolicyInput, detect_unfulfilled_commitment, evaluate
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
@@ -166,13 +166,94 @@ def test_clean_standard_invoice_is_allowed():
 
 
 def test_promise_broken_cause_requires_human():
+    """The LLM-dependent rule, isolated.
+
+    The notes are deliberately neutral: a note that *itself* evidences a
+    lapsed promise is caught earlier by the deterministic rule, which would
+    make this test pass without the diagnosed_cause rule existing at all.
+    """
     d = evaluate(make_input(
         diagnosed_cause="promise_broken",
         recommended_action="send_reminder",
-        client_notes="Said they'd pay by Friday, date has passed with no payment.",
+        client_notes="Spoke to the AP team this morning.",
     ))
     assert d.decision == "REQUIRE_HUMAN"
     assert "diagnosed_cause_promise_broken_requires_human_judgment" in d.reasons
+
+
+def test_unfulfilled_commitment_escalates_without_the_llm_agreeing():
+    """The deterministic twin: a lapsed promise escalates on a wrong diagnosis.
+
+    Regression test for a real held-out failure. INV-1048 — "Client said
+    'processing today' ... Still pending, repeated follow-ups ignored" — was
+    ALLOWed because the model diagnosed it as something benign, and the only
+    rule covering broken promises read the model's `diagnosed_cause`. Forty-
+    eight days overdue and four reminders both sit under their thresholds, so
+    nothing else caught it. The note alone must now be enough.
+    """
+    d = evaluate(make_input(
+        diagnosed_cause="forgotten_invoice",   # the model got it wrong
+        evidence_tier="known",
+        recommended_action="send_reminder",
+        days_overdue=48,                       # under DAYS_OVERDUE_HARD_REVIEW
+        reminders_sent=4,                      # under MAX_REMINDERS_BEFORE_ESCALATION
+        client_notes=(
+            "Client said 'processing today' in email dated 2026-07-28. "
+            "Still pending, repeated follow-ups ignored."
+        ),
+    ))
+    assert d.decision == "REQUIRE_HUMAN"
+    assert "prior_commitment_unfulfilled_or_repeated_stall" in d.reasons
+    assert "send_reminder" in d.blocked_actions
+
+
+@pytest.mark.parametrize("notes", [
+    "Said they'd pay by Aug 5th in last week's call - date has now passed with no payment or update.",
+    "Client committed to clearing dues 'by Friday' three weeks ago via email. Still unpaid, no follow-up from them.",
+    "Promised a partial payment of 50% last month which never arrived. No response to follow-up calls.",
+    "Told our AM 'cheque is in the post' two weeks back. No cheque, no further response.",
+    "Promised payment after their board meeting concluded - meeting happened, payment did not follow.",
+    "Will revert next week. (Same message sent in response to last 4 reminders over 2 months.)",
+    "Please resend the invoice, we can't seem to locate it. (Third time resending this exact invoice.)",
+    "Let me check with accounts and revert. (No revert received after 5 weeks and 3 follow-ups.)",
+    "This is with our approval committee currently. (Same status quoted for 6 consecutive weeks.)",
+    "We'll take care of it soon, no need to keep following up so frequently.",
+])
+def test_lapsed_commitments_never_reach_allow(notes):
+    """Every broken-promise / stall phrasing in the corpus, on a wrong diagnosis."""
+    d = evaluate(make_input(
+        diagnosed_cause="forgotten_invoice",
+        evidence_tier="known",
+        recommended_action="send_reminder",
+        client_notes=notes,
+    ))
+    assert d.decision != "ALLOW", f"autonomous action allowed on: {notes}"
+
+
+@pytest.mark.parametrize("notes", [
+    # Fresh, forward-looking commitments — cooperative clients, safe to action.
+    "Oh sorry, this must have slipped through - let me get it processed today.",
+    "Apologies, this fell off our radar amidst month-end closing. Processing now.",
+    "Thanks for the nudge, completely forgot about this one. Will clear shortly.",
+    "My bad, this invoice got buried in my inbox. On it now.",
+    "Will process in the next payment cycle as usual.",
+    "Bank loan disbursement got delayed - should be resolved by next week and we'll settle immediately.",
+    "We had to prioritize payroll this month. Will clear your dues right after, by the 30th.",
+    "Whoa, totally missed this one in the shuffle of our ERP migration last month. Paying now.",
+    "Ugh, my apologies - I saw this land in my inbox weeks ago and it just never made it to the payment queue.",
+    "We are ready to pay today itself, just need a working payment link - the current one is expired.",
+])
+def test_first_time_commitments_are_not_treated_as_broken(notes):
+    """A promise is not a risk signal; a *lapsed* one is.
+
+    Guards the expensive direction of this rule. Reading "Will clear shortly"
+    as a broken promise would escalate exactly the cooperative clients the
+    system should be able to action, turning a safety rule into a
+    productivity tax.
+    """
+    assert not detect_unfulfilled_commitment(notes), (
+        f"fresh commitment wrongly read as lapsed: {notes}"
+    )
 
 
 def test_deliberate_stall_cause_requires_human():

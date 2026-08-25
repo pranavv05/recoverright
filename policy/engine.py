@@ -28,6 +28,7 @@ from policy.rules import (
     LEGAL_FALSE_POSITIVE_PATTERNS,
     LEGAL_PATTERNS,
     MAX_REMINDERS_BEFORE_ESCALATION,
+    UNFULFILLED_COMMITMENT_PATTERNS,
     UNVERIFIED_PAYMENT_CLAIM_PATTERNS,
     VALID_EVIDENCE_TIERS,
     WEAK_EVIDENCE_TIERS,
@@ -36,6 +37,15 @@ from policy.rules import (
 
 @dataclass
 class PolicyInput:
+    """The complete set of facts `evaluate()` is allowed to decide on.
+
+    Deliberately a flat record of primitives rather than the raw invoice: the
+    engine cannot reach for a field nobody listed here, so what the policy
+    depends on is reviewable in one place. Only `evidence_tier` and
+    `diagnosed_cause` originate from the LLM, and both are documented at
+    their rule sites as tightening-only.
+    """
+
     invoice_id: str
     amount_paise: int
     outstanding_balance_paise: int
@@ -53,6 +63,15 @@ class PolicyInput:
 
 @dataclass
 class PolicyDecision:
+    """One engine verdict: ALLOW, BLOCK, or REQUIRE_HUMAN, plus its reasons.
+
+    `allowed_actions` — not the LLM's recommendation — is what the
+    orchestrator routes on, so a decision carries its own permission set
+    rather than deferring to whatever proposed it. `reasons` are stable
+    snake_case identifiers, not prose: the dashboard, the worker priority
+    table, and the evaluation all match on them.
+    """
+
     invoice_id: str
     decision: str
     reasons: List[str]
@@ -143,6 +162,16 @@ def detect_legal(client_notes: str) -> str:
     one.
     """
     return _first_uncancelled(client_notes, LEGAL_PATTERNS, LEGAL_FALSE_POSITIVE_PATTERNS)
+
+
+def detect_unfulfilled_commitment(client_notes: str) -> str:
+    """Returns the matched lapsed-commitment phrase, or "" if none.
+
+    Matches evidence that a *previous* commitment or contact went unanswered,
+    not the presence of a commitment. See UNFULFILLED_COMMITMENT_PATTERNS for
+    why the distinction is the whole rule.
+    """
+    return _matches(client_notes, UNFULFILLED_COMMITMENT_PATTERNS)
 
 
 def detect_dispute(client_notes: str) -> str:
@@ -273,6 +302,26 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             ],
             allowed_actions=["gather_information", "escalate_to_human"],
             blocked_actions=["send_reminder", "send_collection_message"],
+        )
+
+    # ── 2d. Unfulfilled prior commitment / repeated stall ────────
+    # Deterministic twin of the high-risk-cause rule directly below. That one
+    # reads the LLM's `diagnosed_cause`; this one reads the note itself, so a
+    # broken promise still escalates when the model misclassifies it. Sits
+    # ahead of the LLM-dependent rule deliberately — the guarantee for this
+    # class must not be contingent on a model call.
+    commitment_hit = detect_unfulfilled_commitment(notes)
+    if commitment_hit:
+        return PolicyDecision(
+            invoice_id=inp.invoice_id,
+            decision="REQUIRE_HUMAN",
+            reasons=[
+                "prior_commitment_unfulfilled_or_repeated_stall",
+                f"matched_phrase:{commitment_hit[:80]}",
+            ],
+            allowed_actions=["escalate_to_human"],
+            blocked_actions=["send_reminder", "send_collection_message",
+                             "create_payment_link"],
         )
 
     # ── 3. High-risk diagnosed cause ─────────────────────────────

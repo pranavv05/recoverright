@@ -76,6 +76,30 @@ def test_sub_paise_precision_is_rounded_and_warned_not_dropped():
     assert "row 7" in warnings[0]
 
 
+def test_sub_paise_precision_rounding_down_to_zero_still_warns():
+    """The rounding that loses the entire amount is the one worth warning about.
+
+    A tenth of a paise rounds to nothing. Returning 0 silently would turn a
+    typo'd line item into a free invoice, so the warning matters more here
+    than in the ordinary rounding case above, not less.
+    """
+    warnings = []
+    assert _rupees_to_paise("0.001", "amount", 2, warnings) == 0
+    assert len(warnings) == 1
+    assert "sub-paise precision" in warnings[0]
+
+
+def test_exact_two_decimal_places_produces_no_warning():
+    """A well-formed rupees-and-paise figure is not a rounding event.
+
+    Guards the other direction of the warning: if every row warned, the
+    warning would carry no information and merchants would learn to ignore it.
+    """
+    warnings = []
+    assert _rupees_to_paise("1234.56", "amount", 2, warnings) == 123456
+    assert warnings == []
+
+
 def test_negative_amount_is_rejected_by_the_converter():
     with pytest.raises(ValueError, match="must be positive"):
         _rupees_to_paise("-500", "amount", 2)

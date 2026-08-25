@@ -1,8 +1,15 @@
 import base64
 import json
+import os
 import time
 
 import httpx
+
+# Overridable so the client can be pointed at a mock or a proxy in a test
+# environment without editing code. Defaults are Razorpay's live API host and
+# a timeout short enough that a hung batch fails fast rather than stalling.
+RAZORPAY_BASE_URL = os.getenv("RAZORPAY_BASE_URL", "https://api.razorpay.com/v1")
+RAZORPAY_TIMEOUT_SECONDS = float(os.getenv("RAZORPAY_TIMEOUT_SECONDS", "15"))
 
 
 class RateLimitError(Exception):
@@ -54,7 +61,7 @@ class RazorpayClient:
     it as a distinct outcome instead of a generic client error.
     """
 
-    BASE_URL = "https://api.razorpay.com/v1"
+    BASE_URL = RAZORPAY_BASE_URL
 
     def __init__(self, key_id: str, key_secret: str):
         credentials = base64.b64encode(
@@ -98,7 +105,7 @@ class RazorpayClient:
                     "customer": {"name": client_name},
                     "notify": {"sms": False, "email": False}
                 },
-                timeout=15.0
+                timeout=RAZORPAY_TIMEOUT_SECONDS
             )
         except httpx.RequestError as e:
             raise ServerError(f"Razorpay request failed for {invoice_id}: {e}") from e
@@ -139,7 +146,7 @@ class RazorpayClient:
             response = httpx.get(
                 f"{self.BASE_URL}/payment_links/{payment_link_id}",
                 headers=self.headers,
-                timeout=15.0
+                timeout=RAZORPAY_TIMEOUT_SECONDS
             )
         except httpx.RequestError as e:
             raise ServerError(
@@ -190,7 +197,7 @@ class RazorpayClient:
                     f"{self.BASE_URL}/invoices",
                     headers=self.headers,
                     params={"count": self.INVOICE_PAGE_SIZE, "skip": skip},
-                    timeout=15.0
+                    timeout=RAZORPAY_TIMEOUT_SECONDS
                 )
             except httpx.RequestError as e:
                 raise ServerError(f"Razorpay invoice list request failed: {e}") from e

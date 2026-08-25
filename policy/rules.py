@@ -214,6 +214,59 @@ DOCUMENTATION_BLOCKER_PATTERNS = _compile([
     r"\b(tax\s+invoice|gst\s+invoice|e-?way\s*bill|challan|certificate)\b",
 ])
 
+# A commitment the client already made and did not keep, or a stall repeated
+# across several contacts. Either way an automated approach has *already been
+# tried and has already failed*, which is precisely when continuing to
+# auto-chase does damage.
+#
+# This exists because HIGH_RISK_DIAGNOSED_CAUSES reads the LLM's
+# `diagnosed_cause`, and so the guarantee for this whole class of invoice was
+# only as good as an 8B model's classification. It was not good enough: a
+# held-out evaluation put INV-1048 — "Client said 'processing today' ...
+# Still pending, repeated follow-ups ignored", a textbook broken promise —
+# through as ALLOW because the model diagnosed it as something else, and
+# nothing downstream was watching. Forty-eight days overdue and four
+# reminders both sit under their thresholds, so severity did not catch it
+# either. That is one inappropriate autonomous action on a case the system
+# exists to escalate.
+#
+# The cue deliberately keys on the *non-fulfilment*, not on the promise. A
+# forward-looking commitment is not a risk signal by itself and reading it as
+# one would be actively wrong: "let me get it processed today", "Will clear
+# shortly", "we'll settle immediately" are what a cooperative client says on
+# a first contact, and those invoices are safe to action. What separates
+# INV-1048 from them is the evidence *around* the promise that a previous one
+# already lapsed — a date that passed, a cheque that never came, the same
+# sentence sent for the fourth time. So that is what is matched.
+UNFULFILLED_COMMITMENT_PATTERNS = _compile([
+    # A stated deadline came and went.
+    r"\b(deadline|date|month|meeting|cycle|timeline|eta)\b[\s\S]{0,40}?"
+    r"\b(passed|elapsed|closed|expired|came\s+and\s+went|has\s+now\s+passed)\b",
+    r"\bpassed\s+(twice|again|now|already)\b",
+    # The promised thing did not arrive.
+    r"\b(no|zero|not\s+a|without\s+a)\s+"
+    r"(payment|cheque|check|remittance|revert|response|reply|update|"
+    r"further\s+(response|detail|update)|follow[-\s]?up)\b",
+    r"\b(never|did\s+not|didn'?t|has\s+not|hasn'?t)\s+"
+    r"(arrive\w*|come\s+through|materialis\w+|materializ\w+|follow\w*|"
+    r"respond\w*|revert\w*|happen\w*|reach\s+us)\b",
+    r"\b(still)\s+(unpaid|pending|outstanding|not\s+\w+|no\s+\w+)\b",
+    r"\b(payment|cheque|check)\s+did\s+not\s+follow\b",
+    # The same contact has been repeated with no movement — a stall.
+    r"\b(same|identical)\s+(message|status|response|reply|excuse|line|invoice)\b"
+    r"[\s\S]{0,40}?\b(sent|quoted|given|repeated|again|consecutive|last|"
+    r"reminders?|weeks?|times?)\b",
+    r"\b(second|third|fourth|fifth|2nd|3rd|4th|5th)\s+time\b",
+    r"\b(repeated|repeatedly|multiple|several)\s+"
+    r"(follow[-\s]?ups?|reminders?|asks?|requests?|attempts?|chasers?)\b",
+    r"\b(follow[-\s]?ups?|reminders?|asks?|requests?|calls?)\s+"
+    r"(ignored|unanswered|unacknowledged|went\s+unanswered)\b",
+    r"\bsaid\s+this\s+\w{0,12}\s?(reminders?|weeks?|times?|calls?)\s+ago\b",
+    r"\b(despite|in\s+spite\s+of)\s+(repeated|multiple|several|our)\b",
+    r"\bfor\s+\d+\s+consecutive\s+(weeks?|months?|cycles?)\b",
+    r"\bno\s+need\s+to\s+keep\s+following\s+up\b",
+])
+
 # The note itself hedges between two incompatible explanations. When the
 # evidence on record says "it could be A or it could be B", the agent has no
 # basis to pick one and act on it — that is precisely a human's call.

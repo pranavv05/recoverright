@@ -43,7 +43,12 @@ from database.connection import (
     run_async,
 )
 from policy.engine import PolicyInput, evaluate
-from diagnosis.diagnoser import close_async_clients, diagnose, diagnose_async
+from diagnosis.diagnoser import (
+    close_async_clients,
+    diagnose,
+    diagnose_async,
+    reset_rate_limit_state,
+)
 from evaluation.analytics import compute_batch_analytics
 from evaluation.health_scorer import score_client_health
 from execution.razorpay_client import (
@@ -87,6 +92,7 @@ def load_dataset(path: str) -> list:
     """Loads a JSON invoice dataset from disk."""
     with open(path) as f:
         return json.load(f)
+
 
 def process_invoice(invoice: dict, api_key: str, rzp_client=None) -> dict:
     """Runs one invoice through the full pipeline: insert → diagnose → policy → act → audit.
@@ -362,6 +368,11 @@ async def run_batch_async(dataset_path: str, limit: int = None, rzp_client=None)
     if limit:
         invoices = invoices[:limit]
 
+    # Start from the configured pace rather than inheriting whatever a previous
+    # batch in this process backed off to, so a run's timing is a property of
+    # the run and not of what happened before it.
+    reset_rate_limit_state()
+
     total = len(invoices)
     settled = await asyncio.gather(
         *(
@@ -390,6 +401,74 @@ async def run_batch_async(dataset_path: str, limit: int = None, rzp_client=None)
             })
         else:
             results.append(outcome)
+
+    return await _sweep_failed_async(invoices, results, api_key, rzp_client)
+
+
+# Statuses that mean "the LLM never answered", as opposed to a real decision.
+# `skipped` is deliberately absent: an invoice with nothing outstanding was
+# decided, it just wasn't chased.
+_RETRYABLE_STATUSES = {"diagnosis_failed", "error"}
+
+# Serial recovery pass. Kept small on purpose — this is a safety net for a
+# saturated rate limit, not a second batch.
+SWEEP_MAX_PASSES = 2
+SWEEP_PAUSE_SECONDS = 3.0
+
+
+async def _sweep_failed_async(invoices, results, api_key, rzp_client):
+    """Retries invoices the concurrent pass could not diagnose, one at a time.
+
+    The fan-out is tuned for throughput against a shared free-tier endpoint,
+    and a burst that trips its rate limit can exhaust an invoice's retry
+    budget on the limit rather than on anything about the invoice. Those
+    invoices are not failures of the pipeline, and leaving them as
+    `diagnosis_failed` misreports the batch: the dashboard shows `n/a` where
+    there is no decision, and the evaluation's denominators quietly shrink.
+
+    So once the herd has drained, whatever is still unresolved is retried
+    sequentially — no concurrency, a pause between attempts, so it is asking
+    the API for one request at a time rather than competing with itself. A
+    result that comes back still-failed is kept as-is and reported honestly;
+    this pass can only improve the batch, never mask a genuine failure.
+    """
+    for pass_number in range(1, SWEEP_MAX_PASSES + 1):
+        pending = [
+            index for index, result in enumerate(results)
+            if result.get("status") in _RETRYABLE_STATUSES
+        ]
+        if not pending:
+            break
+
+        log.warning(
+            "sweep pass %d/%d: retrying %d invoice(s) serially after the "
+            "concurrent pass could not diagnose them",
+            pass_number, SWEEP_MAX_PASSES, len(pending),
+        )
+        reset_rate_limit_state()
+
+        for index in pending:
+            invoice = invoices[index]
+            await asyncio.sleep(SWEEP_PAUSE_SECONDS)
+            try:
+                retried = await process_invoice_async(invoice, api_key, rzp_client)
+            except Exception as e:
+                log.error("[%s] sweep retry failed: %s", invoice["invoice_id"], e)
+                continue
+            if retried.get("status") not in _RETRYABLE_STATUSES:
+                log.info("[%s] recovered on sweep pass %d",
+                         invoice["invoice_id"], pass_number)
+                results[index] = retried
+
+    still_failed = [
+        r["invoice_id"] for r in results
+        if r.get("status") in _RETRYABLE_STATUSES
+    ]
+    if still_failed:
+        log.error(
+            "%d invoice(s) undiagnosed after %d sweep pass(es): %s",
+            len(still_failed), SWEEP_MAX_PASSES, ", ".join(still_failed),
+        )
 
     return results
 
@@ -689,9 +768,19 @@ def _razorpay_invoice_to_internal(raw: dict) -> dict:
 
 app = FastAPI(title="RecoverRight API")
 
+# The dashboard's dev origin by default; override with a comma-separated
+# CORS_ALLOWED_ORIGINS for any other deployment. Deliberately an explicit
+# allowlist rather than "*" — this API creates payment links, and a wildcard
+# origin on a credentialed endpoint is how a CSRF gets written.
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

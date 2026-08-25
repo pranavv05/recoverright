@@ -801,7 +801,14 @@ export default function App() {
     }
   }, [])
 
+  // fetchAll() opens by setting the three loading flags to true. On this mount
+  // that is a no-op: all three already initialise to true, and React bails out
+  // of a re-render when the next state is Object.is-equal to the current one,
+  // so there is no cascading render for the lint rule to protect against. The
+  // calls are not removable either — the same fetchAll() is the manual Refresh
+  // handler, where the flags are genuinely flipping back from false.
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect
     fetchAll()
   }, [fetchAll])
 

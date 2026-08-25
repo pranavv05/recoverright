@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import os
+import random
 import re
 import time
 
@@ -16,18 +18,107 @@ from policy.rules import KNOWN_ACTIONS, VALID_EVIDENCE_TIERS
 
 log = logging.getLogger(__name__)
 
-NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
+def _env_int(name: str, default: int) -> int:
+    """Reads a positive int from the environment, falling back to `default`."""
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("%s=%r is not an integer — using default %d", name, raw, default)
+        return default
+    if value < 1:
+        log.warning("%s=%d must be >= 1 — using default %d", name, value, default)
+        return default
+    return value
+
+
+def _env_float(name: str, default: float) -> float:
+    """Reads a non-negative float from the environment, falling back to `default`."""
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number — using default %s", name, raw, default)
+        return default
+    if value < 0:
+        log.warning("%s=%s must be >= 0 — using default %s", name, value, default)
+        return default
+    return value
+
+
+NVIDIA_BASE_URL = os.getenv(
+    "NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"
+)
 # meta/llama-3.3-70b-instruct was consistently timing out on NVIDIA's free
 # tier at the time of integration; meta/llama-3.1-8b-instruct responded
 # reliably and fast in repeated live checks.
-NVIDIA_MODEL = "meta/llama-3.1-8b-instruct"
-MAX_RETRIES = 5
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.1-8b-instruct")
+MAX_RETRIES = _env_int("NVIDIA_MAX_RETRIES", 6)
+REQUEST_TIMEOUT_SECONDS = _env_float("NVIDIA_REQUEST_TIMEOUT_SECONDS", 30.0)
 
 # Stagger between the two ReAct calls for a single invoice, so a burst of
 # invoices being diagnosed concurrently doesn't double the request rate at
 # the exact same instant. The per-invoice concurrency limit lives with the
 # batch runner; this only spaces out the two calls within one diagnosis.
-INTRA_DIAGNOSIS_DELAY_SECONDS = 0.5
+INTRA_DIAGNOSIS_DELAY_SECONDS = _env_float("NVIDIA_INTRA_DIAGNOSIS_DELAY", 0.5)
+
+# ── Backoff ──────────────────────────────────────────────────────────────
+# Exponential, but *jittered*, and that jitter is the whole point rather
+# than a nicety. A batch fans 52 invoices out at once; they hit the free
+# tier's rate limit at roughly the same instant, and with a bare `2 **
+# attempt` they then all sleep for exactly the same 2s and retry in
+# lockstep. Every retry wave collides exactly like the first, all six
+# attempts are burned inside a few seconds, and the batch reports
+# `diagnosis_failed` for most of the book while the API was merely busy.
+# Full jitter (`random.uniform(0, cap)`, per AWS's "Exponential Backoff and
+# Jitter") spreads a synchronised herd across the window instead.
+BACKOFF_BASE_SECONDS = _env_float("NVIDIA_BACKOFF_BASE_SECONDS", 1.5)
+BACKOFF_MAX_SECONDS = _env_float("NVIDIA_BACKOFF_MAX_SECONDS", 45.0)
+
+
+def _retry_after_seconds(error) -> float:
+    """Seconds requested by a `Retry-After` header, or 0.0 if absent/unparseable.
+
+    The server knows how long its own window has left; when it says so,
+    that beats any locally guessed backoff. Only the delta-seconds form is
+    honoured — the HTTP-date form is not what these APIs send, and guessing
+    at clock skew to parse it would be worse than falling back to jitter.
+    """
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return 0.0
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    if not raw:
+        return 0.0
+    try:
+        seconds = float(str(raw).strip())
+    except ValueError:
+        return 0.0
+    return min(max(seconds, 0.0), BACKOFF_MAX_SECONDS)
+
+
+def _backoff_delay(attempt: int, retry_after: float = 0.0) -> float:
+    """Full-jitter exponential backoff, floored by any server `Retry-After`.
+
+    `attempt` is 1-based. The cap grows as base * 2**(attempt-1), and the
+    actual sleep is drawn uniformly from [0, cap] so concurrent callers
+    that failed together do not retry together.
+    """
+    cap = min(BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), BACKOFF_MAX_SECONDS)
+    jittered = random.uniform(0.0, cap)
+    # Retry-After is a floor, not a replacement: if every task honoured the
+    # identical server-supplied delay and nothing else, they would resynchronise
+    # on it. Adding a fraction of the jitter keeps them spread.
+    if retry_after > 0:
+        return min(retry_after + jittered * 0.25, BACKOFF_MAX_SECONDS)
+    return jittered
+
 
 VALID_CAUSES = {
     "dispute", "payment_link_failure", "chronic_late_payer", "forgotten_invoice",
@@ -418,29 +509,32 @@ def _call_nvidia(
                 ],
                 temperature=0.1,
                 max_tokens=max_tokens,
-                timeout=30.0,
+                timeout=REQUEST_TIMEOUT_SECONDS,
             )
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
             response = client.chat.completions.create(**kwargs)
         except openai.RateLimitError as e:
             last_error = f"rate limited: {e}"
-            log.warning("[%s] %s rate limited (attempt %d/%d)",
-                        invoice_id, call_label, attempt, MAX_RETRIES)
-            time.sleep(2 ** attempt)
+            delay = _backoff_delay(attempt, _retry_after_seconds(e))
+            log.warning("[%s] %s rate limited (attempt %d/%d) — retrying in %.1fs",
+                        invoice_id, call_label, attempt, MAX_RETRIES, delay)
+            time.sleep(delay)
             continue
         except (openai.APIConnectionError, openai.APITimeoutError) as e:
             last_error = f"network error: {e}"
-            log.warning("[%s] %s request failed (attempt %d/%d): %s",
-                        invoice_id, call_label, attempt, MAX_RETRIES, last_error)
-            time.sleep(2 ** attempt)
+            delay = _backoff_delay(attempt)
+            log.warning("[%s] %s request failed (attempt %d/%d): %s — retrying in %.1fs",
+                        invoice_id, call_label, attempt, MAX_RETRIES, last_error, delay)
+            time.sleep(delay)
             continue
         except openai.APIStatusError as e:
             if e.status_code >= 500:
                 last_error = f"{e.status_code} server error: {e.message}"
-                log.warning("[%s] %s server error (attempt %d/%d): %s",
-                            invoice_id, call_label, attempt, MAX_RETRIES, last_error)
-                time.sleep(2 ** attempt)
+                delay = _backoff_delay(attempt, _retry_after_seconds(e))
+                log.warning("[%s] %s server error (attempt %d/%d): %s — retrying in %.1fs",
+                            invoice_id, call_label, attempt, MAX_RETRIES, last_error, delay)
+                time.sleep(delay)
                 continue
             raise ValueError(
                 f"NVIDIA NIM API error {e.status_code} for {invoice_id} ({call_label}): {e.message}"
@@ -569,16 +663,159 @@ def diagnose(invoice: dict, api_key: str = None) -> dict:
 # behaviour.
 #
 # The semaphore below is the rate limit. NVIDIA NIM's free tier will not take
-# fifty-two simultaneous requests; six in flight is what the batch is allowed
-# to hold. It is enforced around the HTTP call itself rather than around a
-# whole diagnosis, so a request never occupies a slot while it is only
-# sleeping between retries.
+# fifty-two simultaneous requests; a small number in flight is what the batch
+# is allowed to hold. It is enforced around the HTTP call itself rather than
+# around a whole diagnosis, so a request never occupies a slot while it is
+# only sleeping between retries.
+#
+# Four rather than six: at six, a 52-invoice batch (104 requests) reliably
+# tripped the free tier's limit, and because every task then backed off by
+# the same un-jittered interval they retried in lockstep and burned all
+# their attempts inside a few seconds. Four in flight, full-jitter backoff,
+# and the cooldown gate below are three independent parts of the same fix —
+# lowering concurrency alone only makes the collision less likely, it does
+# not stop a herd that has already synchronised.
 # ─────────────────────────────────────────────────────────────────────────
 
-MAX_CONCURRENT_LLM_CALLS = 6
+MAX_CONCURRENT_LLM_CALLS = _env_int("NVIDIA_MAX_CONCURRENCY", 4)
 
 _llm_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
 _llm_semaphore_loop = None
+
+# ── Shared cooldown gate + adaptive pacer ────────────────────────────────
+# A 429 is information about the *shared* upstream window, not about the one
+# invoice that happened to receive it. Backing off only that task leaves the
+# other in-flight tasks hammering an API that has just said stop, so each of
+# them collects its own 429 and the batch spends its retry budget learning
+# the same fact N times over.
+#
+# So a 429 anywhere opens a cooldown that *every* task checks before its next
+# request. The gate is advisory and monotonic-clock based: it never blocks a
+# request that is already in flight, it only delays the next one, and a later
+# 429 can extend the window but never shorten it.
+#
+# The cooldown alone is still not enough, and the reason is worth stating
+# because it is the mistake this file made twice. A semaphore caps how many
+# requests are *in flight*; a rate limit counts how many *start* per unit
+# time. Those are different quantities, and they only coincide when latency
+# is constant. Four concurrent slots against a fast endpoint issues requests
+# far quicker than four-per-second, so the batch can sit under its
+# concurrency cap and still be well over the rate limit — which is exactly
+# what happened: fourteen invoices exhausted a six-attempt retry budget on
+# 429s while never exceeding four in flight.
+#
+# The pacer below therefore limits the thing the server actually measures:
+# the interval between request starts. It widens multiplicatively on a 429
+# and decays back geometrically on sustained success, so a batch finds the
+# endpoint's real capacity instead of assuming one.
+_cooldown_until = 0.0
+_pacer_lock = None
+_pacer_lock_loop = None
+_next_slot_at = 0.0
+
+MIN_REQUEST_INTERVAL_SECONDS = _env_float("NVIDIA_MIN_REQUEST_INTERVAL", 0.4)
+MAX_REQUEST_INTERVAL_SECONDS = _env_float("NVIDIA_MAX_REQUEST_INTERVAL", 4.0)
+_request_interval = MIN_REQUEST_INTERVAL_SECONDS
+
+# Multiplicative increase on a 429, geometric decay on success — the same
+# shape as TCP congestion control, and for the same reason: overshooting
+# costs a retry budget, undershooting costs only a little throughput.
+#
+# Recovery is deliberately brisk. A first pass tried 0.93 every 5 successes
+# and the interval never came back down: the opening burst pushed it to the
+# 6s ceiling, decay could not outrun the occasional 429, and a 52-invoice
+# batch that should take ~2 minutes took over 7. Decaying 15% every 3 clean
+# responses lets the batch settle at the endpoint's actual capacity instead
+# of parking at the ceiling, while still yielding immediately when pushed back.
+_PACE_BACKOFF_FACTOR = 1.8
+_PACE_RECOVERY_FACTOR = 0.85
+_consecutive_successes = 0
+_SUCCESSES_BEFORE_SPEEDUP = 3
+
+
+def _get_pacer_lock() -> asyncio.Lock:
+    """Returns the pacer's lock, rebuilt if the running loop has changed.
+
+    Same loop-affinity problem as the semaphore: an asyncio primitive binds to
+    the first loop that awaits it.
+    """
+    global _pacer_lock, _pacer_lock_loop
+    loop = asyncio.get_running_loop()
+    if _pacer_lock_loop is not loop:
+        _pacer_lock = asyncio.Lock()
+        _pacer_lock_loop = loop
+    return _pacer_lock
+
+
+def _open_cooldown(seconds: float) -> None:
+    """Extends the shared cooldown window to at least `seconds` from now."""
+    global _cooldown_until
+    _cooldown_until = max(_cooldown_until, time.monotonic() + seconds)
+
+
+def note_rate_limited() -> None:
+    """Widens the request interval after a 429. Called by every retry path."""
+    global _request_interval, _consecutive_successes
+    _consecutive_successes = 0
+    _request_interval = min(
+        _request_interval * _PACE_BACKOFF_FACTOR, MAX_REQUEST_INTERVAL_SECONDS
+    )
+    log.debug("pacer: widened request interval to %.2fs", _request_interval)
+
+
+def note_request_succeeded() -> None:
+    """Narrows the request interval after a run of clean responses."""
+    global _request_interval, _consecutive_successes
+    _consecutive_successes += 1
+    if _consecutive_successes >= _SUCCESSES_BEFORE_SPEEDUP:
+        _consecutive_successes = 0
+        _request_interval = max(
+            _request_interval * _PACE_RECOVERY_FACTOR, MIN_REQUEST_INTERVAL_SECONDS
+        )
+
+
+async def _acquire_pace_slot() -> None:
+    """Blocks until this caller may start its request.
+
+    Hands out start times at least `_request_interval` apart, globally across
+    the batch. The lock is held only while claiming a slot, never while
+    sleeping on it, so claiming is O(1) and concurrent callers queue up
+    behind distinct future slots rather than all waking on the same one.
+    """
+    global _next_slot_at
+    async with _get_pacer_lock():
+        now = time.monotonic()
+        slot = max(now, _next_slot_at)
+        _next_slot_at = slot + _request_interval
+    wait = slot - time.monotonic()
+    if wait > 0:
+        await asyncio.sleep(wait)
+
+
+async def _await_cooldown() -> None:
+    """Waits out any open cooldown window, then claims a pacing slot.
+
+    The cooldown is re-checked in a loop because the window can be extended by
+    another task's 429 while this one is already waiting on it.
+    """
+    while True:
+        remaining = _cooldown_until - time.monotonic()
+        if remaining <= 0:
+            break
+        # A small extra jitter on top so tasks released by the same window do
+        # not all fire on the same tick.
+        await asyncio.sleep(remaining + random.uniform(0.0, 0.35))
+    await _acquire_pace_slot()
+
+
+def reset_rate_limit_state() -> None:
+    """Resets the cooldown window and the pacer. For tests and between batches."""
+    global _cooldown_until, _next_slot_at, _request_interval, _consecutive_successes
+    _cooldown_until = 0.0
+    _next_slot_at = 0.0
+    _request_interval = MIN_REQUEST_INTERVAL_SECONDS
+    _consecutive_successes = 0
+
 
 # One AsyncOpenAI per (event loop, API key). The client owns an httpx
 # connection pool belonging to the loop that created it, so it is cached per
@@ -650,10 +887,13 @@ async def _call_nvidia_async(
                 ],
                 temperature=0.1,
                 max_tokens=max_tokens,
-                timeout=30.0,
+                timeout=REQUEST_TIMEOUT_SECONDS,
             )
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
+            # Respect any cooldown another task's 429 opened before spending a
+            # semaphore slot on a request the API has just said it won't take.
+            await _await_cooldown()
             # The semaphore is held for the request only. Parsing, validation
             # and backoff all happen outside it, so a slot is never occupied
             # by an invoice that is not actually talking to the API.
@@ -661,26 +901,43 @@ async def _call_nvidia_async(
                 response = await client.chat.completions.create(**kwargs)
         except openai.RateLimitError as e:
             last_error = f"rate limited: {e}"
-            log.warning("[%s] %s rate limited (attempt %d/%d)",
-                        invoice_id, call_label, attempt, MAX_RETRIES)
-            await asyncio.sleep(2 ** attempt)
+            retry_after = _retry_after_seconds(e)
+            delay = _backoff_delay(attempt, retry_after)
+            # Tell every other task about the shared window, not just this one,
+            # and slow the whole batch's request rate rather than only this task's.
+            note_rate_limited()
+            _open_cooldown(retry_after if retry_after > 0 else min(delay, 5.0))
+            log.warning("[%s] %s rate limited (attempt %d/%d) — retrying in %.1fs",
+                        invoice_id, call_label, attempt, MAX_RETRIES, delay)
+            await asyncio.sleep(delay)
             continue
         except (openai.APIConnectionError, openai.APITimeoutError) as e:
             last_error = f"network error: {e}"
-            log.warning("[%s] %s request failed (attempt %d/%d): %s",
-                        invoice_id, call_label, attempt, MAX_RETRIES, last_error)
-            await asyncio.sleep(2 ** attempt)
+            delay = _backoff_delay(attempt)
+            log.warning("[%s] %s request failed (attempt %d/%d): %s — retrying in %.1fs",
+                        invoice_id, call_label, attempt, MAX_RETRIES, last_error, delay)
+            await asyncio.sleep(delay)
             continue
         except openai.APIStatusError as e:
             if e.status_code >= 500:
                 last_error = f"{e.status_code} server error: {e.message}"
-                log.warning("[%s] %s server error (attempt %d/%d): %s",
-                            invoice_id, call_label, attempt, MAX_RETRIES, last_error)
-                await asyncio.sleep(2 ** attempt)
+                retry_after = _retry_after_seconds(e)
+                delay = _backoff_delay(attempt, retry_after)
+                # A 5xx from a shared endpoint is also shared information.
+                note_rate_limited()
+                _open_cooldown(retry_after if retry_after > 0 else min(delay, 5.0))
+                log.warning("[%s] %s server error (attempt %d/%d): %s — retrying in %.1fs",
+                            invoice_id, call_label, attempt, MAX_RETRIES, last_error, delay)
+                await asyncio.sleep(delay)
                 continue
             raise ValueError(
                 f"NVIDIA NIM API error {e.status_code} for {invoice_id} ({call_label}): {e.message}"
             ) from e
+
+        # The endpoint answered. Let the pacer creep back toward full speed —
+        # a truncated or unparseable body below is a model problem, not a
+        # capacity one, so the signal belongs here rather than after parsing.
+        note_request_succeeded()
 
         choice = response.choices[0]
         content = choice.message.content
