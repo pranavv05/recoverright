@@ -188,6 +188,13 @@ def test_llm_semaphore_caps_concurrency_at_the_configured_limit(no_pacing):
 
 def test_llm_semaphore_queues_the_excess_rather_than_dropping_it(no_pacing):
     """The calls beyond the limit wait their turn; none is skipped or lost."""
+    # The pacer bounds requests *started* per second; with instant fakes it
+    # would keep them from ever overlapping and leave the semaphore — the
+    # thing under test — unexercised. Pacing is asserted separately.
+    monkeypatch.setattr(diagnoser, "MIN_REQUEST_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(diagnoser, "_request_interval", 0.0)
+    monkeypatch.setattr(diagnoser, "_next_slot_at", 0.0)
+    monkeypatch.setattr(diagnoser, "_cooldown_until", 0.0)
     recorder = ConcurrencyRecorder()
     client = FakeClient(recorder)
 
@@ -314,7 +321,8 @@ def test_cooldown_from_one_task_is_observed_by_every_other_task():
 # ─────────────────────────────────────────────────────────────────────────
 
 def test_one_failing_diagnosis_does_not_stop_the_other_invoices(monkeypatch):
-    """A diagnose_async() that raises is contained to its own invoice."""
+    """A diagnose_async() that raises is contained to its own invoice, and that
+    invoice fails closed to a human rather than leaving the batch."""
     failing_id = "TEST-PARALLEL-003"
     audited = []
 
@@ -366,6 +374,10 @@ def test_one_failing_diagnosis_does_not_stop_the_other_invoices(monkeypatch):
     assert len(failed) == 1
     assert failed[0]["status"] == "diagnosis_failed"
     assert "exploded" in failed[0]["error"]
+    # Failing closed: the invoice still got a decision and a worker, so it is
+    # in a human's queue rather than silently gone from the run.
+    assert failed[0]["policy_decision"] == "REQUIRE_HUMAN"
+    assert failed[0]["worker"]
 
     assert len(survived) == 5
     for result in survived:
@@ -520,8 +532,11 @@ def test_run_batch_async_returns_one_result_per_invoice(monkeypatch, tmp_path):
     failed = [r for r in results if r.get("status") == "diagnosis_failed"]
     assert len(failed) == 1 and failed[0]["invoice_id"] == failing_id
 
+    # Every invoice gets a decision, the failed one included: it fails closed
+    # to REQUIRE_HUMAN rather than leaving the batch without one.
     decided = [r for r in results if r.get("policy_decision")]
-    assert len(decided) == 9
+    assert len(decided) == 10
+    assert failed[0]["policy_decision"] == "REQUIRE_HUMAN"
 
     # Nothing escaped as a bare exception record.
     assert not [r for r in results if r.get("status") == "error"]
@@ -801,3 +816,62 @@ def test_dispatch_falls_back_to_a_worker_thread_on_an_incompatible_loop(
 
     assert len(results) == 4
     assert all(r.get("policy_decision") for r in results)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Rate pacing — the control the concurrency cap does not provide
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_rate_pacer_spaces_out_every_consecutive_request_start():
+    """Asserts the gap between *each* pair of starts, not just the total span.
+
+    A pacer that released seven requests at once and the eighth a second later
+    would pass a total-elapsed check while doing nothing useful. What the rate
+    limit actually counts is the spacing of consecutive starts, so that is what
+    is measured.
+    """
+    gap = 0.05
+    starts = []
+
+    async def scenario():
+        diagnoser.reset_rate_limit_state()
+        diagnoser._request_interval = gap
+
+        async def one():
+            await diagnoser._acquire_pace_slot()
+            starts.append(asyncio.get_running_loop().time())
+
+        await asyncio.gather(*(one() for _ in range(8)))
+
+    try:
+        run(scenario())
+    finally:
+        diagnoser.reset_rate_limit_state()
+
+    assert len(starts) == 8
+    starts.sort()
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    # Generous slack for timer granularity; the point is that starts are
+    # spread rather than simultaneous.
+    assert all(g >= gap * 0.5 for g in gaps), f"requests were not paced apart: {gaps}"
+    assert starts[-1] - starts[0] >= gap * 5, "eight paced calls should span several gaps"
+
+
+def test_retry_after_header_is_preferred_over_a_guessed_backoff():
+    """When the server says how long to wait, guessing is worse than listening."""
+    class _Response:
+        headers = {"retry-after": "3"}
+
+    class _Error(Exception):
+        response = _Response()
+
+    assert diagnoser._retry_after_seconds(_Error()) == 3.0
+    # Attempt 5 would otherwise draw from a much wider window; the header floors it.
+    assert diagnoser._backoff_delay(5, diagnoser._retry_after_seconds(_Error())) >= 3.0
+
+
+def test_backoff_is_capped_however_many_attempts_have_failed():
+    """The ceiling holds at absurd attempt counts, so a batch cannot stall forever."""
+    assert diagnoser._backoff_delay(20) <= diagnoser.BACKOFF_MAX_SECONDS
+    assert diagnoser._backoff_delay(200) <= diagnoser.BACKOFF_MAX_SECONDS
+    assert diagnoser._backoff_delay(1, retry_after=10_000) <= diagnoser.BACKOFF_MAX_SECONDS

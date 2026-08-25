@@ -679,6 +679,12 @@ def diagnose(invoice: dict, api_key: str = None) -> dict:
 
 MAX_CONCURRENT_LLM_CALLS = _env_int("NVIDIA_MAX_CONCURRENCY", 4)
 
+# Concurrency alone is not a rate limit. NVIDIA NIM's free tier meters
+# requests per minute, so six *concurrent* requests still becomes several
+# hundred requests per minute when each one returns in under a second — which
+# is how a 52-invoice batch (104 calls) reliably walked into HTTP 429 and
+# finished with every invoice undiagnosed.
+#
 _llm_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
 _llm_semaphore_loop = None
 

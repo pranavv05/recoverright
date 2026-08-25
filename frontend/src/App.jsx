@@ -2,7 +2,11 @@ import { useEffect, useState, useCallback } from 'react'
 import axios from 'axios'
 import './App.css'
 
-const api = axios.create({ baseURL: 'http://localhost:8000' })
+// Overridable with VITE_API_BASE_URL so a build can point at something other
+// than a local uvicorn without editing this file.
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000',
+})
 
 const EVIDENCE_LABELS = {
   known: 'Known',
@@ -409,13 +413,6 @@ function ReasoningChain({ trail }) {
   )
 }
 
-// Health-score amounts arrive as integer paise, like every other money field
-// the API emits. Converting for display happens here and nowhere upstream.
-function formatRupees(paise) {
-  if (paise === null || paise === undefined) return '—'
-  return `₹${Math.round(Number(paise) / 100).toLocaleString('en-IN')}`
-}
-
 const HEALTH_SORT_COLUMNS = {
   risk_tier: (row) => RISK_TIER_ORDER[row.risk_tier] ?? 99,
   total_outstanding_paise: (row) => row.total_outstanding_paise ?? 0,
@@ -487,7 +484,7 @@ function ClientHealthTab({ healthScores, loading, onSelectClient }) {
                   {RISK_TIER_LABELS[row.risk_tier] || row.risk_tier}
                 </span>
               </td>
-              <td>{formatRupees(row.total_outstanding_paise)}</td>
+              <td>{rupees(row.total_outstanding_paise)}</td>
               <td>{row.invoice_count}</td>
               <td>{row.days_overdue_avg ?? '—'}</td>
               <td>{TREND_LABELS[row.payment_trend] || row.payment_trend}</td>

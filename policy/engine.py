@@ -15,6 +15,8 @@ from typing import List
 from policy.rules import (
     AMBIGUITY_PATTERNS,
     AUTONOMOUS_ACTIONS,
+    COMMITMENT_LAPSE_PATTERNS,
+    COMMITMENT_PATTERNS,
     DAYS_OVERDUE_ESCALATION,
     DAYS_OVERDUE_HARD_REVIEW,
     DISPUTE_NEGATION_PATTERNS,
@@ -28,7 +30,7 @@ from policy.rules import (
     LEGAL_FALSE_POSITIVE_PATTERNS,
     LEGAL_PATTERNS,
     MAX_REMINDERS_BEFORE_ESCALATION,
-    UNFULFILLED_COMMITMENT_PATTERNS,
+    STALL_REPETITION_PATTERNS,
     UNVERIFIED_PAYMENT_CLAIM_PATTERNS,
     VALID_EVIDENCE_TIERS,
     WEAK_EVIDENCE_TIERS,
@@ -164,14 +166,36 @@ def detect_legal(client_notes: str) -> str:
     return _first_uncancelled(client_notes, LEGAL_PATTERNS, LEGAL_FALSE_POSITIVE_PATTERNS)
 
 
-def detect_unfulfilled_commitment(client_notes: str) -> str:
-    """Returns the matched lapsed-commitment phrase, or "" if none.
+def detect_broken_commitment(client_notes: str) -> tuple:
+    """Returns (commitment_phrase, lapse_phrase), or ("", "") if the note is clean.
 
-    Matches evidence that a *previous* commitment or contact went unanswered,
-    not the presence of a commitment. See UNFULFILLED_COMMITMENT_PATTERNS for
-    why the distinction is the whole rule.
+    Both halves are required. A commitment on its own is a promise that may
+    still be kept; a lapse marker on its own ("still unpaid") is true of every
+    overdue invoice. Only together do they evidence a promise already broken.
+
+    Deliberately reads `client_notes` and nothing else. The neighbouring
+    high-risk-cause rule keys on the model's `diagnosed_cause`, which means a
+    broken promise the model labelled something milder never escalated — this
+    detector reaches the same conclusion from merchant-authored evidence, so
+    the outcome does not vary with a sampled LLM call.
     """
-    return _matches(client_notes, UNFULFILLED_COMMITMENT_PATTERNS)
+    commitment = _matches(client_notes, COMMITMENT_PATTERNS)
+    if not commitment:
+        return "", ""
+    lapse = _matches(client_notes, COMMITMENT_LAPSE_PATTERNS)
+    if not lapse:
+        return "", ""
+    return commitment, lapse
+
+
+def detect_stall_repetition(client_notes: str) -> str:
+    """Returns the matched repetition phrase, or "" if none.
+
+    Fires on its own, unlike `detect_broken_commitment()`: an answer the
+    client has repeated across reminder cycles is itself the evidence that
+    automated contact has stopped working, with or without a promise attached.
+    """
+    return _matches(client_notes, STALL_REPETITION_PATTERNS)
 
 
 def detect_dispute(client_notes: str) -> str:
@@ -191,9 +215,10 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
     """Deterministically evaluates a policy input and returns ALLOW / BLOCK / REQUIRE_HUMAN.
 
     Evaluation order: content hard-stops → dispute → unverified off-platform
-    payment claim → documentation blocker → self-declared ambiguity → high-risk diagnosed cause →
-    account sensitivity → financial invariants → action whitelist → evidence
-    tier → severity → ALLOW.
+    payment claim → documentation blocker → self-declared ambiguity → broken
+    payment commitment → repeated non-answer → high-risk diagnosed cause →
+    account sensitivity →
+    financial invariants → action whitelist → evidence tier → severity → ALLOW.
 
     Order matters and is first-match-wins: the earlier a rule sits, the more
     absolute it is. Nothing after step 1 can turn a hard-stop back into an
@@ -304,20 +329,44 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             blocked_actions=["send_reminder", "send_collection_message"],
         )
 
-    # ── 2d. Unfulfilled prior commitment / repeated stall ────────
-    # Deterministic twin of the high-risk-cause rule directly below. That one
-    # reads the LLM's `diagnosed_cause`; this one reads the note itself, so a
-    # broken promise still escalates when the model misclassifies it. Sits
-    # ahead of the LLM-dependent rule deliberately — the guarantee for this
-    # class must not be contingent on a model call.
-    commitment_hit = detect_unfulfilled_commitment(notes)
+    # ── 2d. Broken payment commitment ────────────────────────────
+    # The deterministic counterpart to rule 3 below, and deliberately ahead of
+    # it: the client made a commitment to pay and it lapsed. That is evident
+    # from the merchant's own note, so it is decided here from merchant data
+    # rather than downstream from the model's `diagnosed_cause` — an invoice
+    # whose broken promise the model labelled `chronic_late_payer` used to
+    # clear every rule and reach ALLOW, which made a safety outcome contingent
+    # on a sampled LLM call.
+    commitment_hit, lapse_hit = detect_broken_commitment(notes)
     if commitment_hit:
         return PolicyDecision(
             invoice_id=inp.invoice_id,
             decision="REQUIRE_HUMAN",
             reasons=[
-                "prior_commitment_unfulfilled_or_repeated_stall",
+                "broken_payment_commitment_requires_human_judgment",
                 f"matched_phrase:{commitment_hit[:80]}",
+                f"lapse_phrase:{lapse_hit[:80]}",
+            ],
+            allowed_actions=["escalate_to_human"],
+            blocked_actions=["send_reminder", "send_collection_message",
+                             "create_payment_link"],
+        )
+
+    # ── 2e. Repeated non-answer across reminder cycles ───────────
+    # The stall's deterministic signature. Sits with the broken-commitment
+    # rule and ahead of the LLM-dependent one for the same reason: it is
+    # derived from the merchant's note, so it does not vary with the model.
+    # Reminder fatigue (step 8) covers the same ground only when the model
+    # also proposes another contact — this catches the stall regardless of
+    # what the model proposed.
+    stall_hit = detect_stall_repetition(notes)
+    if stall_hit:
+        return PolicyDecision(
+            invoice_id=inp.invoice_id,
+            decision="REQUIRE_HUMAN",
+            reasons=[
+                "repeated_non_answer_across_reminder_cycles",
+                f"matched_phrase:{stall_hit[:80]}",
             ],
             allowed_actions=["escalate_to_human"],
             blocked_actions=["send_reminder", "send_collection_message",
@@ -434,22 +483,50 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             blocked_actions=["send_collection_message", "escalate_to_collections"],
         )
 
-    # A "strong_inference" call with zero direct client communication and an
-    # aggressive proposed action is inference stacked on inference — the LLM
-    # cited nothing the client actually said. Require a human sanity check
-    # rather than trusting a confidence label the client never confirmed.
-    if (
-        inp.evidence_tier == "strong_inference"
-        and not notes.strip()
-        and inp.recommended_action == "send_reminder"
-    ):
-        return PolicyDecision(
-            invoice_id=inp.invoice_id,
-            decision="REQUIRE_HUMAN",
-            reasons=["unsupported_inference_no_client_communication"],
-            allowed_actions=["gather_information"],
-            blocked_actions=["send_reminder", "send_collection_message"],
-        )
+    # The evidence tier is the model's own claim about how well grounded its
+    # diagnosis is, so it is checked against the record rather than trusted.
+    # "known" specifically asserts the client told us something. With an empty
+    # client_notes field there is no client communication on record at all, so
+    # the claim contradicts the invoice instead of describing it — and a
+    # confidence label the record does not support must not be what buys
+    # autonomy.
+    #
+    # "strong_inference" is treated differently on purpose: inferring from
+    # payment history alone is legitimate with no notes (a reliably late payer
+    # is diagnosable from their ledger). It is only stopped when the proposed
+    # action would actually reach the client.
+    if not notes.strip():
+        if inp.evidence_tier == "known":
+            return PolicyDecision(
+                invoice_id=inp.invoice_id,
+                decision="REQUIRE_HUMAN",
+                reasons=["evidence_tier_known_contradicted_by_absent_client_communication"],
+                allowed_actions=["gather_information", "wait"],
+                blocked_actions=["send_reminder", "send_collection_message",
+                                 "create_payment_link"],
+            )
+
+        # An inference with zero direct client communication, proposing an
+        # action that contacts the client or asks for money, is inference
+        # stacked on inference — the model cited nothing the client said.
+        #
+        # An earlier revision checked only `send_reminder`, so the same
+        # unsupported inference proposing a payment link instead cleared every
+        # rule and reached ALLOW. `wait` and `gather_information` stay
+        # autonomous: neither contacts the client, and gathering evidence is
+        # the correct response to having none.
+        if (
+            inp.evidence_tier == "strong_inference"
+            and inp.recommended_action in ("send_reminder", "create_payment_link")
+        ):
+            return PolicyDecision(
+                invoice_id=inp.invoice_id,
+                decision="REQUIRE_HUMAN",
+                reasons=["unsupported_inference_no_client_communication"],
+                allowed_actions=["gather_information"],
+                blocked_actions=["send_reminder", "send_collection_message",
+                                 "create_payment_link"],
+            )
 
     # ── 8. Severity ──────────────────────────────────────────────
     if inp.days_overdue > DAYS_OVERDUE_HARD_REVIEW:

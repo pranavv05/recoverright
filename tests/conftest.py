@@ -83,7 +83,7 @@ def sample_invoice():
         "payment_link_attempts": 0,
         "reminders_sent": 1,
         "reminders_opened": 1,
-        "client_notes": "",
+        "client_notes": "Ready to pay, just need the payment link resent.",
         "client_payment_history": ["paid_on_time", "paid_on_time"],
         "account_value_tier": "standard",
         "scenario_type": "test_fixture",
@@ -122,7 +122,10 @@ def make_policy_input():
 
     Replaces the `make_input()` helper duplicated across policy/test_engine.py
     and policy/test_react.py. The defaults are deliberately identical to that
-    helper's, so a test moved between the two files behaves the same.
+    helper's, so a test moved between the two files behaves the same —
+    including the benign `client_notes`, which is present rather than empty
+    because a "known" evidence tier on a note-less invoice is a
+    contradiction the engine escalates on.
     """
     from policy.engine import PolicyInput
 
@@ -137,7 +140,7 @@ def make_policy_input():
             recommended_action="send_reminder",
             requested_amount_paise=1_000_000,
             existing_payment_link=False,
-            client_notes="",
+            client_notes="Ready to pay, just need the payment link resent.",
             hard_stop=False,
             diagnosed_cause="forgotten_invoice",
             reminders_sent=1,

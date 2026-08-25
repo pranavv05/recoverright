@@ -43,7 +43,10 @@ from execution.actions import (
     reconcile_payment,
 )
 from execution.razorpay_client import DuplicateReferenceError, ServerError
-from policy.engine import PolicyDecision  # noqa: F401  (documents the contract)
+# Imported for the type contract only: every execute() below receives a
+# PolicyDecision, and re-exporting it here keeps that visible to a reader
+# of this module. Not referenced at runtime.
+from policy.engine import PolicyDecision  # noqa: F401
 
 log = logging.getLogger(__name__)
 

@@ -153,7 +153,13 @@ DISPUTE_PATTERNS = _compile([
     r"(the\s+|our\s+|what\s+was\s+)?(agreed|quoted|contracted|approved|discussed|negotiated|"
     r"the\s+po|the\s+contract)\b",
     r"\b(should\s+not\s+have\s+been\s+(raised|billed|invoiced)|raised\s+in\s+error|"
-    r"billed\s+in\s+error|duplicate\s+(invoice|billing|charge))\b",
+    r"billed\s+in\s+error)\b",
+    # Double-billing claim, in noun and verb form alike — "duplicate charge"
+    # and "duplicates charges already settled" are the same objection, and
+    # matching only the noun let the verb phrasing through.
+    r"\bduplicat\w+\b[\s\S]{0,20}?\b(invoice|invoices|billing|charge|charges|"
+    r"amount|line\s+item)\b",
+    r"\b(already|previously)\s+(settled|billed|invoiced|charged|paid\s+for)\b",
     r"\b(credit\s+note|debit\s+note|revised\s+invoice|reissue|re-?issue|rectif\w+)\b",
     r"\b(cancel|cancelled|canceled|cancellation)\s+\w{0,12}\s?"
     r"(order|po|invoice|shipment|consignment|dispatch|before)\b",
@@ -214,59 +220,6 @@ DOCUMENTATION_BLOCKER_PATTERNS = _compile([
     r"\b(tax\s+invoice|gst\s+invoice|e-?way\s*bill|challan|certificate)\b",
 ])
 
-# A commitment the client already made and did not keep, or a stall repeated
-# across several contacts. Either way an automated approach has *already been
-# tried and has already failed*, which is precisely when continuing to
-# auto-chase does damage.
-#
-# This exists because HIGH_RISK_DIAGNOSED_CAUSES reads the LLM's
-# `diagnosed_cause`, and so the guarantee for this whole class of invoice was
-# only as good as an 8B model's classification. It was not good enough: a
-# held-out evaluation put INV-1048 — "Client said 'processing today' ...
-# Still pending, repeated follow-ups ignored", a textbook broken promise —
-# through as ALLOW because the model diagnosed it as something else, and
-# nothing downstream was watching. Forty-eight days overdue and four
-# reminders both sit under their thresholds, so severity did not catch it
-# either. That is one inappropriate autonomous action on a case the system
-# exists to escalate.
-#
-# The cue deliberately keys on the *non-fulfilment*, not on the promise. A
-# forward-looking commitment is not a risk signal by itself and reading it as
-# one would be actively wrong: "let me get it processed today", "Will clear
-# shortly", "we'll settle immediately" are what a cooperative client says on
-# a first contact, and those invoices are safe to action. What separates
-# INV-1048 from them is the evidence *around* the promise that a previous one
-# already lapsed — a date that passed, a cheque that never came, the same
-# sentence sent for the fourth time. So that is what is matched.
-UNFULFILLED_COMMITMENT_PATTERNS = _compile([
-    # A stated deadline came and went.
-    r"\b(deadline|date|month|meeting|cycle|timeline|eta)\b[\s\S]{0,40}?"
-    r"\b(passed|elapsed|closed|expired|came\s+and\s+went|has\s+now\s+passed)\b",
-    r"\bpassed\s+(twice|again|now|already)\b",
-    # The promised thing did not arrive.
-    r"\b(no|zero|not\s+a|without\s+a)\s+"
-    r"(payment|cheque|check|remittance|revert|response|reply|update|"
-    r"further\s+(response|detail|update)|follow[-\s]?up)\b",
-    r"\b(never|did\s+not|didn'?t|has\s+not|hasn'?t)\s+"
-    r"(arrive\w*|come\s+through|materialis\w+|materializ\w+|follow\w*|"
-    r"respond\w*|revert\w*|happen\w*|reach\s+us)\b",
-    r"\b(still)\s+(unpaid|pending|outstanding|not\s+\w+|no\s+\w+)\b",
-    r"\b(payment|cheque|check)\s+did\s+not\s+follow\b",
-    # The same contact has been repeated with no movement — a stall.
-    r"\b(same|identical)\s+(message|status|response|reply|excuse|line|invoice)\b"
-    r"[\s\S]{0,40}?\b(sent|quoted|given|repeated|again|consecutive|last|"
-    r"reminders?|weeks?|times?)\b",
-    r"\b(second|third|fourth|fifth|2nd|3rd|4th|5th)\s+time\b",
-    r"\b(repeated|repeatedly|multiple|several)\s+"
-    r"(follow[-\s]?ups?|reminders?|asks?|requests?|attempts?|chasers?)\b",
-    r"\b(follow[-\s]?ups?|reminders?|asks?|requests?|calls?)\s+"
-    r"(ignored|unanswered|unacknowledged|went\s+unanswered)\b",
-    r"\bsaid\s+this\s+\w{0,12}\s?(reminders?|weeks?|times?|calls?)\s+ago\b",
-    r"\b(despite|in\s+spite\s+of)\s+(repeated|multiple|several|our)\b",
-    r"\bfor\s+\d+\s+consecutive\s+(weeks?|months?|cycles?)\b",
-    r"\bno\s+need\s+to\s+keep\s+following\s+up\b",
-])
-
 # The note itself hedges between two incompatible explanations. When the
 # evidence on record says "it could be A or it could be B", the agent has no
 # basis to pick one and act on it — that is precisely a human's call.
@@ -279,6 +232,112 @@ AMBIGUITY_PATTERNS = _compile([
     r"[\s\S]{0,60}?\b(history|previously|before|pattern|record|past)\b",
     r"\b(genuine|real|legitimate)\b[\s\S]{0,30}?\bor\s+(just\s+)?(an?\s+)?"
     r"(excuse|stall|delay\s+tactic|pretext)\b",
+])
+
+# A payment commitment the client made and did not keep.
+#
+# Detected as two families that must BOTH appear in the note, because either
+# one alone is ordinary collections correspondence: "we will pay on Friday"
+# is a promise not yet broken, and "still unpaid" is the baseline condition
+# of every invoice in the book. Only their co-occurrence describes a client
+# who has already absorbed one round of trust — the point at which continuing
+# to chase automatically stops being the right call and a human should decide.
+#
+# This exists because HIGH_RISK_DIAGNOSED_CAUSES reads the model's
+# `diagnosed_cause`, so a broken promise the model labelled something milder
+# (chronic_late_payer, forgotten_invoice) escaped escalation entirely and the
+# invoice fell through to ALLOW. That made a safety outcome contingent on a
+# sampled LLM call. These patterns read `client_notes` — merchant-authored
+# data the model never touches — so the same evidence escalates on every run
+# whether or not the model recognised it.
+#
+# Written as generic semantic families, per this file's header: commitment
+# verbs and non-fulfilment markers, not phrases lifted from the corpus.
+COMMITMENT_PATTERNS = _compile([
+    # explicit promise / undertaking to pay
+    r"\b(promis\w+|committ\w+|commitment|assur\w+|undert(ook|aken|ake)|pledg\w+|"
+    r"guarante\w+|agreed)\b[\s\S]{0,60}?\b(pay|paid|payment|clear|clearing|settle|"
+    r"settling|remit|remittance|transfer|dues|balance|amount|outstanding)\b",
+    # reported speech: they said/told/confirmed they would pay
+    r"\b(said|told|confirmed|informed|advised|stated|indicated)\b[\s\S]{0,50}?"
+    r"\b(would|will|'?d|going\s+to|shall)\b[\s\S]{0,25}?"
+    r"\b(pay|clear|settle|remit|release|process|transfer)\b",
+    # payment asserted to be already in motion
+    r"\b(cheque|check|payment|transfer|neft|rtgs|imps|funds)\b[\s\S]{0,40}?"
+    r"\b(is\s+in\s+the\s+post|in\s+the\s+mail|on\s+the\s+way|has\s+been\s+"
+    r"(sent|initiated|released)|being\s+processed|processing\s+today)\b",
+    # the deferral commitment — the stall's characteristic promise to respond
+    r"\b(will|shall|'?ll|and|to)\s+(revert|get\s+back|come\s+back|update\s+you|"
+    r"take\s+(this\s+)?up|take\s+care\s+of\s+(it|this)|look\s+into\s+(it|this))\b",
+    # reported speech asserting the payment is happening imminently, with no
+    # modal to anchor the reported-speech pattern above ("said 'processing
+    # today'", "confirmed releasing it tomorrow")
+    r"\b(said|told|confirmed|assured|informed|advised)\b[\s\S]{0,40}?"
+    r"\b(process\w*|clear\w*|releas\w*|pay\w*|initiat\w*|settl\w*)\b[\s\S]{0,20}?"
+    r"\b(today|tomorrow|this\s+(week|month)|shortly|immediately|right\s+away)\b",
+])
+
+# The commitment above did not hold: a date that passed, money that never
+# came, or the same answer repeated across reminder cycles.
+COMMITMENT_LAPSE_PATTERNS = _compile([
+    # a deadline that has come and gone
+    r"\b(deadline|date|due\s+date|month|week|timeline)\b[\s\S]{0,30}?"
+    r"\b(has\s+)?(now\s+)?(passed|elapsed|lapsed|expired|gone\s+by|closed)\b",
+    r"\bpassed\s+(twice|again|already|without)\b",
+    # the payment did not arrive
+    r"\b(never\s+(arrived|came|materialis\w+|received)|did\s+not\s+(arrive|come|follow|"
+    r"materialise)|didn'?t\s+(arrive|come|follow)|no\s+(payment|cheque|funds|remittance)\b"
+    r"[\s\S]{0,25}?(received|since|yet|so\s+far)?|zero\s+payment)\b",
+    r"\bstill\s+(unpaid|pending|outstanding|not\s+(paid|received|cleared))\b",
+    # they went silent after committing
+    r"\b(no\s+(response|reply|revert|update|follow-?up|further\s+(response|detail|reply))|"
+    r"repeated\s+follow-?ups?\s+ignored|follow-?ups?\s+(ignored|unanswered)|"
+    r"never\s+respond\w*)\b",
+])
+
+# The client has given the same non-answer across multiple reminder cycles.
+#
+# Unlike the two families above this one escalates on its own, because the
+# repetition *is* the finding: an answer that has not changed in six weeks is
+# not a commitment that might still be kept, it is evidence that automated
+# contact has stopped working. Requiring a commitment phrase alongside it
+# would miss exactly the stall that never promises anything — "this is with
+# our approval committee" repeated for six weeks, which is the shape a
+# deliberate stall actually takes.
+#
+# Every pattern here requires an explicit repetition marker (same/identical,
+# an ordinal, a consecutive-period count). A note that merely describes one
+# follow-up does not match.
+STALL_REPETITION_PATTERNS = _compile([
+    r"\b(same|identical)\s+(\w+\s+){0,2}(message|status|response|reply|excuse|"
+    r"line|update|invoice|answer)\b",
+    r"\b(second|third|fourth|fifth|sixth|\d+\s?(st|nd|rd|th))\s+time\b",
+    r"\b(said|sent|quoted|repeated|told\s+us)\s+(this|the\s+same)\b[\s\S]{0,50}?"
+    r"\b(ago|again|before|consecutive|reminders?|weeks?|months?|cycles?)\b",
+    r"\b(for|over|across)\s+\d+\s+consecutive\s+"
+    r"(weeks?|months?|reminders?|cycles?|follow-?ups?)\b",
+    r"\b(in\s+response\s+to|after)\s+(the\s+)?(last\s+)?\d+\s+"
+    r"(reminders?|follow-?ups?|emails?|calls?)\b",
+    r"\b(repeatedly|over\s+and\s+over|every\s+single\s+time)\b",
+    # ── Standing non-answers, which carry the repetition implicitly ──
+    # An explicit repetition marker is the clearest signature of a stall but
+    # not the only one, and requiring one cost two real deliberate_stall
+    # invoices in the corpus. Both of these say "contact has stopped working"
+    # without ever using the word "same" or an ordinal:
+    #
+    #   INV-1055  "…our new AP contact instead? (New contact never responds
+    #             either.)"  — habitual non-response, and "either" is the only
+    #             hint that it has happened before.
+    #   INV-1056  "We'll take care of it soon, no need to keep following up so
+    #             frequently."  — the client asking us to stop chasing *is*
+    #             the finding; nothing here is a countable repetition.
+    #
+    # A present-tense "never responds" is a pattern, not an event, which is
+    # why it can stand alone here where a bare lapse marker could not.
+    r"\bnever\s+(responds?|replies|reverts|gets\s+back|answers?)\b",
+    r"\b(no|never\s+any)\s+(response|reply|revert)\s+(from\s+\w+\s+)?either\b",
+    r"\bno\s+need\s+to\s+keep\s+(following\s+up|chasing|reminding|calling)\b",
+    r"\b(stop|quit)\s+(following\s+up|chasing|reminding)\b",
 ])
 
 # Attempts to steer the agent rather than describe the invoice. Detects
