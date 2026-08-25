@@ -320,3 +320,116 @@ def test_every_hard_stop_invoice_in_the_corpus_blocks():
             not_blocked.append((invoice["invoice_id"], decision.decision))
 
     assert not_blocked == [], f"hard-stop invoices not blocked: {not_blocked}"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# The model as adversary
+#
+# The engine reads `diagnosed_cause` and `evidence_tier` from a sampled LLM
+# call. This sweeps every benign value of both against every autonomous
+# action, for every invoice ground truth says needs a human, and pins which
+# invoices can still reach ALLOW.
+#
+# It is written as an exact-set assertion rather than a count so that any
+# change in either direction is visible: closing one of the known escapes
+# fails this test and asks for the list to be narrowed, and opening a new one
+# fails it too.
+# ─────────────────────────────────────────────────────────────────────────
+
+import itertools
+import json
+import os
+
+import pytest
+
+from policy.engine import PolicyInput, evaluate
+
+BENIGN_CAUSES = ["forgotten_invoice", "payment_link_failure", "chronic_late_payer",
+                 "wrong_contact", "cash_flow_delay", "unknown"]
+AUTONOMOUS = ["send_reminder", "create_payment_link", "gather_information", "wait"]
+TIERS = ["known", "strong_inference", "unknown"]
+
+# Invoices that can still reach ALLOW when the model is wrong in the worst
+# available way. All four are the same case: no client_notes at all, ground
+# truth `unknown`, and an inference the record cannot support. They escape
+# only via `wait` and `gather_information` — neither contacts the client, moves
+# money, nor is irreversible.
+#
+# Closing this would mean escalating every note-less invoice, which
+# over-escalates eleven invoices ground truth marks safe to action, for no
+# gain in what the client actually experiences. The trade is documented in
+# README § Limitations rather than papered over.
+KNOWN_ESCAPES_UNDER_WORST_CASE_DIAGNOSIS = {
+    "INV-1062", "INV-1064", "INV-1065", "INV-1066",
+}
+
+DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+
+
+def _all_invoices():
+    with open(os.path.join(DATA, "all_invoices.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_a_wrong_diagnosis_cannot_authorise_client_contact_on_a_human_only_invoice():
+    """No invoice needing a human may reach ALLOW on an action that touches the
+    client or asks for money, whatever the model returns."""
+    contacting = {"send_reminder", "create_payment_link"}
+    offenders = []
+
+    for inv in _all_invoices():
+        if not (inv["requires_human"] or inv["hard_stop"]):
+            continue
+        outstanding = inv["amount_paise"] - inv["partial_payment_received_paise"]
+        for cause, action, tier in itertools.product(BENIGN_CAUSES, contacting, TIERS):
+            decision = evaluate(PolicyInput(
+                invoice_id=inv["invoice_id"], amount_paise=inv["amount_paise"],
+                outstanding_balance_paise=outstanding, days_overdue=inv["days_overdue"],
+                account_value_tier=inv["account_value_tier"], evidence_tier=tier,
+                recommended_action=action, requested_amount_paise=outstanding,
+                existing_payment_link=inv["payment_link_status"] == "active",
+                client_notes=inv.get("client_notes") or "",
+                hard_stop=inv.get("hard_stop", False), diagnosed_cause=cause,
+                reminders_sent=inv["reminders_sent"],
+            ))
+            if decision.decision == "ALLOW":
+                offenders.append((inv["invoice_id"], cause, action, tier))
+
+    assert offenders == [], (
+        f"{len(offenders)} client-facing action(s) authorised on human-only "
+        f"invoices under a wrong diagnosis: {offenders[:5]}"
+    )
+
+
+def test_worst_case_escapes_are_exactly_the_documented_set():
+    """Pins the full escape set, non-contacting actions included."""
+    escaped = set()
+    for inv in _all_invoices():
+        if not (inv["requires_human"] or inv["hard_stop"]):
+            continue
+        outstanding = inv["amount_paise"] - inv["partial_payment_received_paise"]
+        for cause, action, tier in itertools.product(BENIGN_CAUSES, AUTONOMOUS, TIERS):
+            decision = evaluate(PolicyInput(
+                invoice_id=inv["invoice_id"], amount_paise=inv["amount_paise"],
+                outstanding_balance_paise=outstanding, days_overdue=inv["days_overdue"],
+                account_value_tier=inv["account_value_tier"], evidence_tier=tier,
+                recommended_action=action, requested_amount_paise=outstanding,
+                existing_payment_link=inv["payment_link_status"] == "active",
+                client_notes=inv.get("client_notes") or "",
+                hard_stop=inv.get("hard_stop", False), diagnosed_cause=cause,
+                reminders_sent=inv["reminders_sent"],
+            ))
+            if decision.decision == "ALLOW":
+                escaped.add(inv["invoice_id"])
+
+    assert escaped == KNOWN_ESCAPES_UNDER_WORST_CASE_DIAGNOSIS, (
+        f"unexpected: {escaped - KNOWN_ESCAPES_UNDER_WORST_CASE_DIAGNOSIS}, "
+        f"now-closed: {KNOWN_ESCAPES_UNDER_WORST_CASE_DIAGNOSIS - escaped}"
+    )
+
+
+@pytest.mark.parametrize("invoice_id", sorted(KNOWN_ESCAPES_UNDER_WORST_CASE_DIAGNOSIS))
+def test_documented_escapes_have_no_client_notes(invoice_id):
+    """The documented escapes are all the note-less case, not a grab bag."""
+    inv = next(i for i in _all_invoices() if i["invoice_id"] == invoice_id)
+    assert not (inv.get("client_notes") or "").strip()

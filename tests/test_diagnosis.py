@@ -461,6 +461,8 @@ def test_diagnose_async_returns_the_same_contract_as_diagnose(monkeypatch, invoi
     monkeypatch.setattr(diagnoser, "_get_async_client",
                         lambda api_key: FakeClient(responder, is_async=True))
     monkeypatch.setattr(diagnoser, "INTRA_DIAGNOSIS_DELAY_SECONDS", 0)
+    # See the note in test_diagnosis.py: pacing is asserted separately.
+    monkeypatch.setattr(diagnoser, "MIN_SECONDS_BETWEEN_LLM_CALLS", 0)
 
     result = run_async(diagnoser.diagnose_async(invoice, api_key="test-key"))
     assert result["diagnosed_cause"] == "forgotten_invoice"
@@ -486,6 +488,8 @@ def test_diagnose_semaphore_limits_concurrency_to_six(monkeypatch, sample_invoic
         lambda api_key: FakeClient(responder, is_async=True, delay=0.02, tracker=tracker),
     )
     monkeypatch.setattr(diagnoser, "INTRA_DIAGNOSIS_DELAY_SECONDS", 0)
+    # See the note in test_diagnosis.py: pacing is asserted separately.
+    monkeypatch.setattr(diagnoser, "MIN_SECONDS_BETWEEN_LLM_CALLS", 0)
 
     async def run_ten():
         invoices = [dict(sample_invoice, invoice_id=f"INV-{n}") for n in range(10)]
@@ -514,6 +518,8 @@ def test_diagnose_async_one_failure_does_not_take_down_the_others(monkeypatch, s
     monkeypatch.setattr(diagnoser, "_get_async_client",
                         lambda api_key: FakeClient(responder, is_async=True))
     monkeypatch.setattr(diagnoser, "INTRA_DIAGNOSIS_DELAY_SECONDS", 0)
+    # See the note in test_diagnosis.py: pacing is asserted separately.
+    monkeypatch.setattr(diagnoser, "MIN_SECONDS_BETWEEN_LLM_CALLS", 0)
 
     async def run_three():
         invoices = [dict(sample_invoice, invoice_id=name)

@@ -252,7 +252,7 @@ def test_client_health_rows_carry_the_scoring_fields(client_health):
     if not rows:
         pytest.skip("client health has not been scored yet")
     for field in ("client_name", "risk_tier", "pattern_description", "invoice_count",
-                  "total_outstanding_rupees", "dominant_cause", "promise_broken_count",
+                  "total_outstanding_paise", "dominant_cause", "promise_broken_count",
                   "dispute_count", "days_overdue_avg", "payment_trend",
                   "capital_flag", "capital_flag_reason"):
         assert field in rows[0], f"/api/client-health row is missing {field!r}"

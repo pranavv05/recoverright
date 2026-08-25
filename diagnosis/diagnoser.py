@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import random
 import re
 import time
 
@@ -425,22 +426,25 @@ def _call_nvidia(
             response = client.chat.completions.create(**kwargs)
         except openai.RateLimitError as e:
             last_error = f"rate limited: {e}"
-            log.warning("[%s] %s rate limited (attempt %d/%d)",
-                        invoice_id, call_label, attempt, MAX_RETRIES)
-            time.sleep(2 ** attempt)
+            delay = _retry_after_seconds(e, attempt)
+            log.warning("[%s] %s rate limited (attempt %d/%d), retrying in %.1fs",
+                        invoice_id, call_label, attempt, MAX_RETRIES, delay)
+            time.sleep(delay)
             continue
         except (openai.APIConnectionError, openai.APITimeoutError) as e:
             last_error = f"network error: {e}"
+            delay = _retry_after_seconds(e, attempt)
             log.warning("[%s] %s request failed (attempt %d/%d): %s",
                         invoice_id, call_label, attempt, MAX_RETRIES, last_error)
-            time.sleep(2 ** attempt)
+            time.sleep(delay)
             continue
         except openai.APIStatusError as e:
             if e.status_code >= 500:
                 last_error = f"{e.status_code} server error: {e.message}"
+                delay = _retry_after_seconds(e, attempt)
                 log.warning("[%s] %s server error (attempt %d/%d): %s",
                             invoice_id, call_label, attempt, MAX_RETRIES, last_error)
-                time.sleep(2 ** attempt)
+                time.sleep(delay)
                 continue
             raise ValueError(
                 f"NVIDIA NIM API error {e.status_code} for {invoice_id} ({call_label}): {e.message}"
@@ -577,8 +581,26 @@ def diagnose(invoice: dict, api_key: str = None) -> dict:
 
 MAX_CONCURRENT_LLM_CALLS = 6
 
+# Concurrency alone is not a rate limit. NVIDIA NIM's free tier meters
+# requests per minute, so six *concurrent* requests still becomes several
+# hundred requests per minute when each one returns in under a second — which
+# is how a 52-invoice batch (104 calls) reliably walked into HTTP 429 and
+# finished with every invoice undiagnosed.
+#
+# This is the pace: a minimum gap between successive request *starts*,
+# process-wide. It bounds requests per minute directly rather than inferring
+# it from concurrency, and it costs nothing when the model is the slow part.
+MIN_SECONDS_BETWEEN_LLM_CALLS = 0.35
+
+# Ceiling on a single backoff sleep, so a Retry-After the server pads out
+# cannot stall a batch indefinitely.
+MAX_BACKOFF_SECONDS = 30.0
+
 _llm_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
 _llm_semaphore_loop = None
+_llm_pacer_lock = None
+_llm_pacer_loop = None
+_llm_next_slot = 0.0
 
 # One AsyncOpenAI per (event loop, API key). The client owns an httpx
 # connection pool belonging to the loop that created it, so it is cached per
@@ -586,6 +608,52 @@ _llm_semaphore_loop = None
 # rather than rebuilt per invoice, which would mean a fresh TLS handshake for
 # every call.
 _async_clients = {}
+
+
+async def _pace_llm_call() -> None:
+    """Blocks until at least MIN_SECONDS_BETWEEN_LLM_CALLS has passed since the
+    previous request start, process-wide.
+
+    Held only across the reservation, never across the request itself, so
+    concurrency stays governed by the semaphore — this caps the *rate*, not
+    the number in flight.
+    """
+    global _llm_pacer_lock, _llm_pacer_loop, _llm_next_slot
+
+    loop = asyncio.get_running_loop()
+    # Same rebind-per-loop reasoning as the semaphore below.
+    if _llm_pacer_loop is not loop:
+        _llm_pacer_lock = asyncio.Lock()
+        _llm_pacer_loop = loop
+        _llm_next_slot = 0.0
+
+    async with _llm_pacer_lock:
+        now = loop.time()
+        wait = max(0.0, _llm_next_slot - now)
+        _llm_next_slot = max(now, _llm_next_slot) + MIN_SECONDS_BETWEEN_LLM_CALLS
+    if wait:
+        await asyncio.sleep(wait)
+
+
+def _retry_after_seconds(error, attempt: int) -> float:
+    """Seconds to wait before the next attempt.
+
+    Prefers the server's own Retry-After header when it sends one — guessing
+    at a backoff while the server is explicitly saying how long to wait is how
+    a client keeps arriving early and staying rate limited. Falls back to
+    exponential backoff with jitter; the jitter matters because up to six
+    invoices back off simultaneously and a fixed 2**attempt would send them
+    all back at the same instant.
+    """
+    response = getattr(error, "response", None)
+    header = getattr(response, "headers", {}) or {}
+    raw = header.get("retry-after") or header.get("Retry-After")
+    if raw:
+        try:
+            return min(float(raw), MAX_BACKOFF_SECONDS)
+        except (TypeError, ValueError):
+            pass
+    return min(2 ** attempt + random.uniform(0, 1), MAX_BACKOFF_SECONDS)
 
 
 def get_llm_semaphore() -> asyncio.Semaphore:
@@ -658,25 +726,29 @@ async def _call_nvidia_async(
             # and backoff all happen outside it, so a slot is never occupied
             # by an invoice that is not actually talking to the API.
             async with get_llm_semaphore():
+                await _pace_llm_call()
                 response = await client.chat.completions.create(**kwargs)
         except openai.RateLimitError as e:
             last_error = f"rate limited: {e}"
-            log.warning("[%s] %s rate limited (attempt %d/%d)",
-                        invoice_id, call_label, attempt, MAX_RETRIES)
-            await asyncio.sleep(2 ** attempt)
+            delay = _retry_after_seconds(e, attempt)
+            log.warning("[%s] %s rate limited (attempt %d/%d), retrying in %.1fs",
+                        invoice_id, call_label, attempt, MAX_RETRIES, delay)
+            await asyncio.sleep(delay)
             continue
         except (openai.APIConnectionError, openai.APITimeoutError) as e:
             last_error = f"network error: {e}"
+            delay = _retry_after_seconds(e, attempt)
             log.warning("[%s] %s request failed (attempt %d/%d): %s",
                         invoice_id, call_label, attempt, MAX_RETRIES, last_error)
-            await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(delay)
             continue
         except openai.APIStatusError as e:
             if e.status_code >= 500:
                 last_error = f"{e.status_code} server error: {e.message}"
+                delay = _retry_after_seconds(e, attempt)
                 log.warning("[%s] %s server error (attempt %d/%d): %s",
                             invoice_id, call_label, attempt, MAX_RETRIES, last_error)
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(delay)
                 continue
             raise ValueError(
                 f"NVIDIA NIM API error {e.status_code} for {invoice_id} ({call_label}): {e.message}"

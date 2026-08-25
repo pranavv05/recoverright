@@ -215,9 +215,12 @@ def test_information_worker_output_is_a_draft_not_a_send(run_pipeline):
 
 
 def test_reminder_fatigue_stops_further_automated_contact(run_pipeline):
+    # A benign note, not an empty one: reminder fatigue is what this test is
+    # about, and an empty note against a "known" evidence tier trips the
+    # earlier evidence-contradiction rule instead.
     result, events, _invoice = run_pipeline(
         reminders_sent=7,
-        client_notes="",
+        client_notes="Following up again this month, no update from their side.",
         invoice_id_label="fatigue",
     )
     assert result["policy_decision"] == "REQUIRE_HUMAN"
@@ -313,7 +316,15 @@ def test_reasoning_trace_is_stripped_before_the_policy_engine(run_pipeline):
 def test_diagnosis_failure_is_recorded_and_does_not_crash_the_batch(
     monkeypatch, db_cleanup, sample_invoice
 ):
-    """A model failure produces a `diagnosis_failed` event and no decision — never an ALLOW."""
+    """A model failure fails closed: the invoice is escalated to a human, never
+    dropped and never ALLOWed.
+
+    The earlier behaviour returned at the failure and the invoice left the run
+    entirely — no policy decision, no worker, nothing in anyone's queue. An
+    outage is not evidence that an invoice is safe to leave alone, so the
+    invoice now continues through the same policy and execution path carrying
+    an "unknown" evidence tier.
+    """
     def exploding_diagnose(invoice, api_key=None):
         raise ValueError("simulated model outage")
 
@@ -323,11 +334,18 @@ def test_diagnosis_failure_is_recorded_and_does_not_crash_the_batch(
     result = main.process_invoice(
         dict(sample_invoice, invoice_id=invoice_id), api_key="test-key", rzp_client=None,
     )
+    # Still flagged as a failure, so the evaluation runner keeps excluding it
+    # from accuracy metrics.
     assert result["status"] == "diagnosis_failed"
-    assert "policy_decision" not in result
+    # …but it now carries a real decision, and that decision is never an ALLOW.
+    assert result["policy_decision"] == "REQUIRE_HUMAN"
+    assert result["diagnosis"]["diagnosis_failed"] is True
 
     events = [e["event_type"] for e in get_audit_trail(invoice_id)]
-    assert events == ["diagnosis_failed"]
+    assert events[0] == "diagnosis_failed"
+    assert "policy_decision" in events
+    # A human actually has this in a queue.
+    assert "escalated_to_human" in events
 
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -56,7 +56,14 @@ def input_from_invoice(invoice: dict, **overrides) -> PolicyInput:
 
 
 def make_input(**overrides) -> PolicyInput:
-    """A clean, unremarkable invoice that should ALLOW unless a test perturbs it."""
+    """A clean, unremarkable invoice that should ALLOW unless a test perturbs it.
+
+    `client_notes` carries a benign note rather than being empty: an
+    `evidence_tier` of "known" asserts the client told us something, so an
+    empty note with that tier is a contradiction the engine now escalates on
+    its own. An empty default would make every test here start from a state
+    the engine is designed to reject.
+    """
     defaults = dict(
         invoice_id="INV-TEST",
         amount_paise=1000000,
@@ -67,7 +74,7 @@ def make_input(**overrides) -> PolicyInput:
         recommended_action="send_reminder",
         requested_amount_paise=1000000,
         existing_payment_link=False,
-        client_notes="",
+        client_notes="Ready to pay, just need the payment link resent.",
         hard_stop=False,
         diagnosed_cause="forgotten_invoice",
         reminders_sent=1,
@@ -166,13 +173,46 @@ def test_clean_standard_invoice_is_allowed():
 
 
 def test_promise_broken_cause_requires_human():
+    """The LLM-dependent rule, isolated: the note carries no commitment language,
+    so `diagnosed_cause` is the only thing that can escalate this."""
     d = evaluate(make_input(
         diagnosed_cause="promise_broken",
+        recommended_action="send_reminder",
+        client_notes="Following up on this one again.",
+    ))
+    assert d.decision == "REQUIRE_HUMAN"
+    assert "diagnosed_cause_promise_broken_requires_human_judgment" in d.reasons
+
+
+def test_broken_commitment_in_notes_escalates_without_the_llm_agreeing():
+    """The deterministic counterpart: the same broken promise escalates on the
+    merchant's note alone, even when the model diagnosed something milder.
+
+    This is the case that used to reach ALLOW — a safety outcome contingent on
+    a sampled LLM call.
+    """
+    d = evaluate(make_input(
+        diagnosed_cause="chronic_late_payer",
         recommended_action="send_reminder",
         client_notes="Said they'd pay by Friday, date has passed with no payment.",
     ))
     assert d.decision == "REQUIRE_HUMAN"
-    assert "diagnosed_cause_promise_broken_requires_human_judgment" in d.reasons
+    assert "broken_payment_commitment_requires_human_judgment" in d.reasons
+
+
+def test_broken_commitment_needs_both_a_promise_and_a_lapse():
+    """Either half alone is ordinary correspondence and must stay actionable."""
+    promise_only = evaluate(make_input(
+        client_notes="We will clear the payment by Friday.",
+        recommended_action="create_payment_link",
+    ))
+    assert promise_only.decision == "ALLOW"
+
+    lapse_only = evaluate(make_input(
+        client_notes="This one is still unpaid.",
+        recommended_action="create_payment_link",
+    ))
+    assert lapse_only.decision == "ALLOW"
 
 
 def test_deliberate_stall_cause_requires_human():
@@ -480,3 +520,78 @@ def test_safe_invoices_are_not_over_escalated(dataset):
         and evaluate(input_from_invoice(inv)).decision != "ALLOW"
     ]
     assert stalled == [], f"safe invoices refused an action: {stalled}"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# LLM-independence of the escalation rules
+#
+# The engine reads two model-produced fields (`diagnosed_cause`,
+# `evidence_tier`). These tests pin the property that matters: an invoice that
+# needs a human still gets one when those two fields are wrong. A safety
+# outcome that only holds when the model agrees is not a safety outcome.
+# ─────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("notes", [
+    "Said they'd pay by Aug 5th in last week's call - date has now passed with no payment or update.",
+    "Client committed to clearing dues 'by Friday' three weeks ago via email. Still unpaid, no follow-up from them.",
+    "Promised a partial payment of 50% last month which never arrived. No response to follow-up calls.",
+    "Client assured payment 'within 10 days' during the reminder call. Deadline passed twice now.",
+    "Committed via WhatsApp to pay before month-end last cycle. Month closed with zero payment received.",
+    "Told our AM 'cheque is in the post' two weeks back. No cheque, no further response.",
+])
+def test_broken_commitment_escalates_under_a_benign_misdiagnosis(notes):
+    """Every one of these is a promise already broken. The model is told it is a
+    routine forgotten invoice and asked to send a link anyway."""
+    d = evaluate(make_input(
+        client_notes=notes,
+        diagnosed_cause="forgotten_invoice",
+        evidence_tier="known",
+        recommended_action="create_payment_link",
+    ))
+    assert d.decision == "REQUIRE_HUMAN", d.reasons
+    assert "create_payment_link" in d.blocked_actions
+
+
+@pytest.mark.parametrize("notes", [
+    "Will revert next week. (Same message sent in response to last 4 reminders over 2 months.)",
+    "This is with our approval committee currently. (Same status quoted for 6 consecutive weeks.)",
+    "Please resend the invoice, we can't seem to locate it. (Third time resending this exact invoice.)",
+])
+def test_repeated_non_answer_escalates_under_a_benign_misdiagnosis(notes):
+    """A stall that repeats the same answer every cycle, misdiagnosed as routine."""
+    d = evaluate(make_input(
+        client_notes=notes,
+        diagnosed_cause="forgotten_invoice",
+        evidence_tier="known",
+        recommended_action="create_payment_link",
+    ))
+    assert d.decision == "REQUIRE_HUMAN", d.reasons
+
+
+def test_known_evidence_tier_is_contradicted_by_an_empty_note():
+    """"known" asserts the client told us something. With no note on record
+    that claim contradicts the invoice, so it cannot buy autonomy."""
+    d = evaluate(make_input(client_notes="", evidence_tier="known",
+                            recommended_action="create_payment_link"))
+    assert d.decision == "REQUIRE_HUMAN"
+    assert "evidence_tier_known_contradicted_by_absent_client_communication" in d.reasons
+
+
+@pytest.mark.parametrize("action", ["send_reminder", "create_payment_link"])
+def test_inference_with_no_client_communication_cannot_contact_the_client(action):
+    """Inferring from payment history is legitimate with no notes; acting on the
+    client off the back of it is not."""
+    d = evaluate(make_input(client_notes="", evidence_tier="strong_inference",
+                            recommended_action=action))
+    assert d.decision == "REQUIRE_HUMAN"
+    assert "unsupported_inference_no_client_communication" in d.reasons
+
+
+@pytest.mark.parametrize("action", ["wait", "gather_information"])
+def test_inference_with_no_client_communication_may_still_gather_or_wait(action):
+    """The precision side of the rule above. Neither action reaches the client,
+    and gathering evidence is the correct response to having none — escalating
+    these would be over-escalation bought for no safety gain."""
+    d = evaluate(make_input(client_notes="", evidence_tier="strong_inference",
+                            recommended_action=action))
+    assert d.decision == "ALLOW", d.reasons

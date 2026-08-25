@@ -138,8 +138,12 @@ def make_invoice(n: int) -> dict:
 # Test 1 — the semaphore caps concurrent LLM calls at six
 # ─────────────────────────────────────────────────────────────────────────
 
-def test_llm_semaphore_caps_concurrency_at_the_configured_limit():
+def test_llm_semaphore_caps_concurrency_at_the_configured_limit(monkeypatch):
     """Twenty simultaneous calls must never put more than six on the wire."""
+    # Concurrency cap and rate pace are two separate controls. The pacer would
+    # serialise these fakes and hide the cap, so it is neutralised here and
+    # asserted on its own in test_rate_pacer_spaces_out_request_starts.
+    monkeypatch.setattr(diagnoser, "MIN_SECONDS_BETWEEN_LLM_CALLS", 0)
     recorder = ConcurrencyRecorder()
     client = FakeClient(recorder)
 
@@ -167,8 +171,9 @@ def test_llm_semaphore_caps_concurrency_at_the_configured_limit():
     )
 
 
-def test_llm_semaphore_queues_the_excess_rather_than_dropping_it():
+def test_llm_semaphore_queues_the_excess_rather_than_dropping_it(monkeypatch):
     """The calls beyond the limit wait their turn; none is skipped or lost."""
+    monkeypatch.setattr(diagnoser, "MIN_SECONDS_BETWEEN_LLM_CALLS", 0)
     recorder = ConcurrencyRecorder()
     client = FakeClient(recorder)
 
@@ -195,7 +200,8 @@ def test_llm_semaphore_queues_the_excess_rather_than_dropping_it():
 # ─────────────────────────────────────────────────────────────────────────
 
 def test_one_failing_diagnosis_does_not_stop_the_other_invoices(monkeypatch):
-    """A diagnose_async() that raises is contained to its own invoice."""
+    """A diagnose_async() that raises is contained to its own invoice, and that
+    invoice fails closed to a human rather than leaving the batch."""
     failing_id = "TEST-PARALLEL-003"
     audited = []
 
@@ -247,6 +253,10 @@ def test_one_failing_diagnosis_does_not_stop_the_other_invoices(monkeypatch):
     assert len(failed) == 1
     assert failed[0]["status"] == "diagnosis_failed"
     assert "exploded" in failed[0]["error"]
+    # Failing closed: the invoice still got a decision and a worker, so it is
+    # in a human's queue rather than silently gone from the run.
+    assert failed[0]["policy_decision"] == "REQUIRE_HUMAN"
+    assert failed[0]["worker"]
 
     assert len(survived) == 5
     for result in survived:
@@ -401,8 +411,11 @@ def test_run_batch_async_returns_one_result_per_invoice(monkeypatch, tmp_path):
     failed = [r for r in results if r.get("status") == "diagnosis_failed"]
     assert len(failed) == 1 and failed[0]["invoice_id"] == failing_id
 
+    # Every invoice gets a decision, the failed one included: it fails closed
+    # to REQUIRE_HUMAN rather than leaving the batch without one.
     decided = [r for r in results if r.get("policy_decision")]
-    assert len(decided) == 9
+    assert len(decided) == 10
+    assert failed[0]["policy_decision"] == "REQUIRE_HUMAN"
 
     # Nothing escaped as a bare exception record.
     assert not [r for r in results if r.get("status") == "error"]
@@ -682,3 +695,61 @@ def test_dispatch_falls_back_to_a_worker_thread_on_an_incompatible_loop(
 
     assert len(results) == 4
     assert all(r.get("policy_decision") for r in results)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Rate pacing — the control the concurrency cap does not provide
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_rate_pacer_spaces_out_request_starts():
+    """Six concurrent slots still becomes hundreds of requests per minute when
+    each returns quickly, which is what walked the batch into HTTP 429. The
+    pacer bounds the rate directly.
+    """
+    gap = 0.05
+    starts = []
+
+    async def scenario():
+        async def one():
+            await diagnoser._pace_llm_call()
+            starts.append(asyncio.get_running_loop().time())
+
+        await asyncio.gather(*(one() for _ in range(8)))
+
+    original = diagnoser.MIN_SECONDS_BETWEEN_LLM_CALLS
+    diagnoser.MIN_SECONDS_BETWEEN_LLM_CALLS = gap
+    try:
+        run(scenario())
+    finally:
+        diagnoser.MIN_SECONDS_BETWEEN_LLM_CALLS = original
+
+    assert len(starts) == 8
+    starts.sort()
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    # Allow generous slack for timer granularity; the point is that the starts
+    # are spread rather than simultaneous.
+    assert all(g >= gap * 0.5 for g in gaps), f"requests were not paced apart: {gaps}"
+    assert starts[-1] - starts[0] >= gap * 5, "eight paced calls should span several gaps"
+
+
+def test_retry_after_header_is_preferred_over_exponential_backoff():
+    """When the server says how long to wait, guessing is worse than listening."""
+    class _Response:
+        headers = {"retry-after": "3"}
+
+    class _Error(Exception):
+        response = _Response()
+
+    # attempt=5 would otherwise back off ~32s; the header wins.
+    assert diagnoser._retry_after_seconds(_Error(), attempt=5) == 3.0
+
+
+def test_backoff_without_a_retry_after_header_is_jittered_and_capped():
+    """No header: exponential with jitter, never above the ceiling."""
+    class _Error(Exception):
+        response = None
+
+    delays = {diagnoser._retry_after_seconds(_Error(), attempt=3) for _ in range(20)}
+    assert len(delays) > 1, "backoff must be jittered, or six retries collide"
+    assert all(8 <= d <= 9 for d in delays), delays
+    assert diagnoser._retry_after_seconds(_Error(), attempt=20) <= diagnoser.MAX_BACKOFF_SECONDS

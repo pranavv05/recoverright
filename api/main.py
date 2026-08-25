@@ -88,6 +88,34 @@ def load_dataset(path: str) -> list:
     with open(path) as f:
         return json.load(f)
 
+# A diagnosis that could not be produced is not a reason to drop the invoice.
+# The model being unreachable, rate limited, or returning something
+# unparseable says nothing about whether the invoice is safe to chase — so the
+# invoice continues through the *same* policy and execution path as any other,
+# carrying an evidence tier of "unknown". The engine turns that into
+# REQUIRE_HUMAN and the orchestrator routes it to the escalation worker, which
+# means a person sees it.
+#
+# The alternative, returning early, silently removed the invoice from the run:
+# no policy decision, no worker, no queue entry, nothing for anyone to action.
+# An invoice carrying a legal threat or a prompt injection would have
+# disappeared exactly as quietly as a routine one.
+def _fail_closed_diagnosis(error: Exception) -> dict:
+    """The diagnosis used when the model could not produce one — deliberately
+    the weakest possible claim, so every downstream rule treats it as such."""
+    return {
+        "diagnosed_cause": "unknown",
+        "evidence_tier": "unknown",
+        "recommended_action": "escalate_to_human",
+        "evidence_cited": "",
+        "reasoning": f"Diagnosis unavailable ({type(error).__name__}: {error}). "
+                     f"Routed to a human without an automated assessment.",
+        "suspicious_content_detected": False,
+        "confidence": 0.0,
+        "diagnosis_failed": True,
+    }
+
+
 def process_invoice(invoice: dict, api_key: str, rzp_client=None) -> dict:
     """Runs one invoice through the full pipeline: insert → diagnose → policy → act → audit.
 
@@ -108,15 +136,20 @@ def process_invoice(invoice: dict, api_key: str, rzp_client=None) -> dict:
         })
         return {"invoice_id": invoice_id, "status": "skipped"}
 
+    diagnosis_failed = False
+    diagnosis_error = None
     try:
         diagnosis = diagnose(invoice, api_key)
     except Exception as e:
-        log.exception("[%s] diagnosis failed", invoice_id)
+        log.exception("[%s] diagnosis failed — failing closed to human review", invoice_id)
         log_audit_event(invoice_id, "diagnosis_failed", {
             "error": str(e),
-            "execution": {"status": "diagnosis_failed", "error": str(e)},
+            "execution": {"status": "diagnosis_failed", "error": str(e),
+                          "disposition": "failing_closed_to_human_review"},
         })
-        return {"invoice_id": invoice_id, "status": "diagnosis_failed", "error": str(e)}
+        diagnosis = _fail_closed_diagnosis(e)
+        diagnosis_failed = True
+        diagnosis_error = str(e)
 
     # The ReAct reasoning chain and the signals it was built from are for the
     # audit trail only — the policy engine gets the same clean diagnosis dict
@@ -182,7 +215,7 @@ def process_invoice(invoice: dict, api_key: str, rzp_client=None) -> dict:
         "execution": execution_result,
     })
 
-    return {
+    result = {
         "invoice_id": invoice_id,
         "diagnosis": diagnosis,
         "policy_decision": decision.decision,
@@ -190,6 +223,15 @@ def process_invoice(invoice: dict, api_key: str, rzp_client=None) -> dict:
         "worker": execution_result.get("worker"),
         "execution": execution_result,
     }
+    if diagnosis_failed:
+        # Still carries the failure status, so the evaluation runner keeps
+        # excluding it from accuracy metrics — the model produced no
+        # diagnosis, and scoring "unknown" against ground truth would be
+        # measuring an outage rather than the system's judgment. The policy
+        # decision and the escalation above are real and already on record.
+        result["status"] = "diagnosis_failed"
+        result["error"] = diagnosis_error
+    return result
 
 
 def run_batch(dataset_path: str, limit: int = None, rzp_client=None) -> list:
@@ -253,15 +295,20 @@ async def process_invoice_async(invoice: dict, api_key: str, rzp_client=None) ->
         })
         return {"invoice_id": invoice_id, "status": "skipped"}
 
+    diagnosis_failed = False
+    diagnosis_error = None
     try:
         diagnosis = await diagnose_async(invoice, api_key)
     except Exception as e:
-        log.exception("[%s] diagnosis failed", invoice_id)
+        log.exception("[%s] diagnosis failed — failing closed to human review", invoice_id)
         await log_audit_event_async(invoice_id, "diagnosis_failed", {
             "error": str(e),
-            "execution": {"status": "diagnosis_failed", "error": str(e)},
+            "execution": {"status": "diagnosis_failed", "error": str(e),
+                          "disposition": "failing_closed_to_human_review"},
         })
-        return {"invoice_id": invoice_id, "status": "diagnosis_failed", "error": str(e)}
+        diagnosis = _fail_closed_diagnosis(e)
+        diagnosis_failed = True
+        diagnosis_error = str(e)
 
     reasoning_trace = diagnosis.pop("_reasoning_trace", {})
     signals = diagnosis.pop("_signals", {})
@@ -318,7 +365,7 @@ async def process_invoice_async(invoice: dict, api_key: str, rzp_client=None) ->
         "execution": execution_result,
     })
 
-    return {
+    result = {
         "invoice_id": invoice_id,
         "diagnosis": diagnosis,
         "policy_decision": decision.decision,
@@ -326,6 +373,15 @@ async def process_invoice_async(invoice: dict, api_key: str, rzp_client=None) ->
         "worker": execution_result.get("worker"),
         "execution": execution_result,
     }
+    if diagnosis_failed:
+        # Still carries the failure status, so the evaluation runner keeps
+        # excluding it from accuracy metrics — the model produced no
+        # diagnosis, and scoring "unknown" against ground truth would be
+        # measuring an outage rather than the system's judgment. The policy
+        # decision and the escalation above are real and already on record.
+        result["status"] = "diagnosis_failed"
+        result["error"] = diagnosis_error
+    return result
 
 
 async def _process_and_report_async(position: int, total: int, invoice: dict,
@@ -689,9 +745,19 @@ def _razorpay_invoice_to_internal(raw: dict) -> dict:
 
 app = FastAPI(title="RecoverRight API")
 
+# The dashboard's dev server origin. Configurable because the hardcoded value
+# is only correct for `npm run dev` on the default port — a deployment behind
+# any other origin needs this without editing the source. Comma-separated for
+# more than one.
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -868,8 +934,10 @@ def api_client_health():
 
     Reads whatever evaluation.health_scorer last wrote to
     client_health_scores — populated after a batch run, not computed here.
-    Money fields are rupees (paise / 100), everywhere else in this table is
-    paise internally.
+    Money is emitted as integer paise, the same unit used everywhere else in
+    the system. An earlier revision divided by 100 here to send rupees, which
+    put a binary float on the one money value this endpoint returns; the
+    dashboard formats paise with integer arithmetic instead.
     """
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -892,7 +960,7 @@ def api_client_health():
             "risk_tier": r["risk_tier"],
             "pattern_description": r["pattern_description"],
             "invoice_count": r["invoice_count"],
-            "total_outstanding_rupees": r["total_outstanding_paise"] / 100,
+            "total_outstanding_paise": r["total_outstanding_paise"],
             "dominant_cause": r["dominant_cause"],
             "promise_broken_count": r["promise_broken_count"],
             "dispute_count": r["dispute_count"],
