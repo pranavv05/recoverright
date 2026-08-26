@@ -2,11 +2,15 @@
 reasoning-chain parsing, full diagnose(), and reasoning_trace audit logging.
 
 The offline parsing test (test_parse_react_output_is_robust) needs neither
-an API key nor a database. The other three call the real NVIDIA NIM API
-(and, for the audit-trail test, the real database) — same pattern as
-evaluation/run.py and policy/test_engine.py's fixtures, this codebase has no
-mocked diagnosis path. They're skipped if NVIDIA_API_KEY isn't configured,
-so `pytest` still runs cleanly without credentials.
+an API key nor a database. The other three call the real NVIDIA NIM API —
+same pattern as evaluation/run.py and policy/test_engine.py's fixtures, this
+codebase has no mocked diagnosis path — and are skipped without
+NVIDIA_API_KEY, so `pytest` runs cleanly with no credentials.
+
+test_reasoning_trace_logged_to_audit_trail needs *both* an API key and a live
+Postgres, so it additionally takes `require_database` (repo-root conftest.py).
+Guarding it on the key alone meant a machine that had credentials but had not
+run `docker compose up` got a connection-timeout error rather than a skip.
 """
 
 import json
@@ -34,13 +38,22 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 API_KEY = os.environ.get("NVIDIA_API_KEY")
 HAS_API_KEY = bool(API_KEY) and API_KEY != "your_nvidia_api_key_here"
 
-# Skipped without credentials, and marked `llm` so the three live tests can be
+# Skipped without credentials, and marked `llm` so the live tests can be
 # deselected as a group: `pytest -m "not llm"`. The marker was declared in
 # pyproject.toml but never applied to anything, which meant the documented way
 # to run the suite without spending API calls silently did nothing.
-requires_api = pytest.mark.llm(
-    pytest.mark.skipif(not HAS_API_KEY, reason="NVIDIA_API_KEY not configured")
-)
+#
+# Applied by stacking, not by nesting. `pytest.mark.llm(pytest.mark.skipif(...))`
+# reads like composition but is not: a MarkDecorator called with a non-callable
+# argument returns a *new mark carrying that argument*, so the skipif became a
+# parameter of the `llm` mark and was never evaluated. The guard silently did
+# nothing, and a machine with no NVIDIA_API_KEY ran these tests anyway — burning
+# the full retry budget against an endpoint it could not authenticate to, then
+# failing, in direct contradiction of this module's docstring.
+def requires_api(test):
+    """Marks `test` as `llm` and skips it when NVIDIA_API_KEY is not configured."""
+    guarded = pytest.mark.skipif(not HAS_API_KEY, reason="NVIDIA_API_KEY not configured")(test)
+    return pytest.mark.llm(guarded)
 
 SIGNAL_ENUMS = {
     "engagement_signal": ENGAGEMENT_SIGNALS,
@@ -215,7 +228,7 @@ def test_diagnose_full_react_call_on_disputed_invoice():
 # ── Test 4: reasoning_trace is logged to the audit trail ───────────────────
 
 @requires_api
-def test_reasoning_trace_logged_to_audit_trail():
+def test_reasoning_trace_logged_to_audit_trail(require_database):
     """process_invoice() must write a reasoning_trace audit event with all 5
     thoughts populated, for a real invoice run through the full pipeline."""
     from api.main import process_invoice

@@ -154,7 +154,7 @@ def test_get_audit_trail_returns_events_in_order(insert_test_invoice):
     assert timestamps == sorted(timestamps)
 
 
-def test_get_audit_trail_for_unknown_invoice_returns_empty_list():
+def test_get_audit_trail_for_unknown_invoice_returns_empty_list(require_database):
     assert get_audit_trail("ZZTEST-does-not-exist") == []
 
 

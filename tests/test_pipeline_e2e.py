@@ -360,7 +360,7 @@ def seen_invoice_ids():
     return {invoice["invoice_id"] for invoice in load_dataset("seen.json")}
 
 
-def test_full_batch_produces_no_null_decisions():
+def test_full_batch_produces_no_null_decisions(require_database):
     """Every seen.json invoice on record carries a real decision, never a null one."""
     ids = seen_invoice_ids()
     with get_connection() as conn:
@@ -384,7 +384,7 @@ def test_full_batch_produces_no_null_decisions():
     assert unexpected == set(), f"undocumented decision values: {unexpected}"
 
 
-def test_full_batch_audit_trail_complete():
+def test_full_batch_audit_trail_complete(require_database):
     """Every processed seen.json invoice has all four core stages on record."""
     ids = seen_invoice_ids()
     required = {"reasoning_trace", "diagnosis", "policy_decision", "orchestrator_routing"}
@@ -414,7 +414,7 @@ def test_full_batch_audit_trail_complete():
     assert incomplete == {}, f"invoices with an incomplete audit trail: {incomplete}"
 
 
-def test_no_blocked_invoice_in_the_trail_ever_produced_a_payment_link():
+def test_no_blocked_invoice_in_the_trail_ever_produced_a_payment_link(require_database):
     """The strongest structural claim, checked against every BLOCK on record."""
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -432,7 +432,7 @@ def test_no_blocked_invoice_in_the_trail_ever_produced_a_payment_link():
     assert offenders == [], f"blocked invoices that later produced a link: {offenders}"
 
 
-def test_no_invoice_in_the_trail_was_allowed_and_blocked_at_the_same_time():
+def test_no_invoice_in_the_trail_was_allowed_and_blocked_at_the_same_time(require_database):
     """Each processing run yields exactly one decision per invoice."""
     with get_connection() as conn:
         with conn.cursor() as cur:

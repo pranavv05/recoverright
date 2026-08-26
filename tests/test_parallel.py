@@ -405,22 +405,13 @@ def test_gather_return_exceptions_keeps_position_and_lets_siblings_finish():
 # Test 3 — concurrent writes through the async pool
 # ─────────────────────────────────────────────────────────────────────────
 
-def _database_reachable() -> bool:
-    try:
-        from database.connection import get_connection
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-        return True
-    except Exception:
-        return False
-
-
-@pytest.mark.skipif(
-    not _database_reachable(),
-    reason="Postgres is not reachable — start it with docker compose up -d",
-)
-def test_concurrent_writes_through_the_async_pool_all_succeed():
+# Guarded by the `require_database` fixture rather than a `skipif` whose
+# condition probes Postgres. A `skipif` condition is evaluated at *collection*
+# time, so the probe ran on every pytest invocation — including
+# `--collect-only` and `-k` runs that never touch a database — and, with no
+# database up, blocked for the full TCP connect timeout before a single test
+# started. The fixture is session-scoped and evaluated at setup instead.
+def test_concurrent_writes_through_the_async_pool_all_succeed(require_database):
     """Thirty concurrent invoice + audit writes land without contention.
 
     Thirty is deliberately above ASYNC_POOL_MAX_SIZE, so the pool has to queue
@@ -584,43 +575,60 @@ def test_run_batch_async_respects_the_limit_argument(monkeypatch, tmp_path):
 # ─────────────────────────────────────────────────────────────────────────
 
 # Diagnoses chosen to reach a different worker each time: an ALLOW that routes
-# to payment_link, an escalation, a block via hard_stop, and a wait.
+# to payment_link, an escalation, a block via hard_stop, a wait, and an
+# information draft.
+#
+# Every `evidence_tier` here must be one of VALID_EVIDENCE_TIERS. An earlier
+# revision used `explicit_client_statement` and `documented_pattern` — a
+# vocabulary the policy engine no longer accepts — so those cases fell through
+# to the unrecognised-tier rule and were routed to the escalation worker
+# instead of to payment_link and wait. The tests still passed, because sync and
+# async agreed on the wrong outcome, and the suite quietly degenerated to
+# exercising two workers out of five. `test_equivalence_cases_reach_five
+# _distinct_workers` below now pins the routing so that cannot recur silently.
+#
+# `client_notes` matters as much as the tier: make_invoice() leaves it empty,
+# and on a note-less invoice a `known` tier is a contradiction the engine
+# escalates on. The cases that need to reach an ALLOW therefore either supply a
+# note or use `strong_inference` with a non-contacting action.
+LINK_EXPIRED_NOTE = "The payment link you sent has expired — please send a fresh one."
+
 EQUIVALENCE_CASES = [
     (
-        "payment_link_failure",
-        {"diagnosed_cause": "payment_link_failure", "evidence_tier": "explicit_client_statement",
+        "payment_link",
+        {"diagnosed_cause": "payment_link_failure", "evidence_tier": "known",
          "recommended_action": "create_payment_link"},
-        {},
+        {"client_notes": LINK_EXPIRED_NOTE},
     ),
     (
         "escalation",
-        {"diagnosed_cause": "promise_broken", "evidence_tier": "explicit_client_statement",
+        {"diagnosed_cause": "promise_broken", "evidence_tier": "known",
          "recommended_action": "create_payment_link"},
-        {},
+        {"client_notes": LINK_EXPIRED_NOTE},
     ),
     (
         "block_hard_stop",
-        {"diagnosed_cause": "dispute", "evidence_tier": "explicit_client_statement",
+        {"diagnosed_cause": "dispute", "evidence_tier": "known",
          "recommended_action": "create_payment_link"},
-        {"hard_stop": True},
+        {"hard_stop": True, "client_notes": LINK_EXPIRED_NOTE},
     ),
     (
-        "chronic_late_payer_wait",
-        {"diagnosed_cause": "chronic_late_payer", "evidence_tier": "documented_pattern",
+        "wait",
+        {"diagnosed_cause": "chronic_late_payer", "evidence_tier": "strong_inference",
          "recommended_action": "wait"},
         {"client_payment_history": ["paid_late"] * 5},
     ),
     (
-        "unknown_information",
-        {"diagnosed_cause": "unknown", "evidence_tier": "unknown",
+        "information",
+        {"diagnosed_cause": "forgotten_invoice", "evidence_tier": "strong_inference",
          "recommended_action": "gather_information"},
         {},
     ),
     (
         "high_value_tier",
-        {"diagnosed_cause": "forgotten_invoice", "evidence_tier": "explicit_client_statement",
+        {"diagnosed_cause": "forgotten_invoice", "evidence_tier": "known",
          "recommended_action": "create_payment_link"},
-        {"account_value_tier": "high_value"},
+        {"account_value_tier": "high_value", "client_notes": LINK_EXPIRED_NOTE},
     ),
 ]
 
@@ -697,6 +705,49 @@ def test_async_pipeline_matches_sync_pipeline_given_the_same_diagnosis(
     # outcome.
     assert [e[1] for e in async_events] == [e[1] for e in sync_events], label
     assert [e[2] for e in async_events] == [e[2] for e in sync_events], label
+
+
+def test_equivalence_cases_reach_five_distinct_workers(monkeypatch):
+    """The equivalence cases must actually exercise every worker they name.
+
+    The sync/async comparison above passes whenever the two pipelines agree —
+    including when they agree on the *wrong* worker. That is not hypothetical:
+    three cases once carried an evidence tier the policy engine had stopped
+    recognising, fell through to the unrecognised-tier rule, and were all
+    routed to `escalation`. Sync and async agreed perfectly, every assertion
+    passed, and the suite was silently testing two workers instead of five.
+
+    So the routing itself is pinned here. This test fails if a case stops
+    reaching its intended worker, whatever the two pipelines think of it.
+    """
+    routed = {}
+
+    for label, diagnosis_overrides, invoice_overrides in EQUIVALENCE_CASES:
+        invoice = make_invoice(1)
+        invoice.update(invoice_overrides)
+
+        monkeypatch.setattr(
+            main, "diagnose",
+            lambda inv, api_key=None, _o=diagnosis_overrides: _fixed_diagnosis(inv, _o),
+        )
+        monkeypatch.setattr(main, "log_audit_event", lambda *a, **k: None)
+        monkeypatch.setattr(main, "insert_invoice", lambda inv: None)
+        monkeypatch.setattr(workers, "log_audit_event", lambda *a, **k: None)
+
+        routed[label] = main.process_invoice(invoice, "fake-key")["worker"]
+
+    assert routed == {
+        "payment_link": "payment_link",
+        "escalation": "escalation",
+        "block_hard_stop": "block",
+        "wait": "wait",
+        "information": "information",
+        "high_value_tier": "escalation",
+    }, f"cases no longer reach their intended workers: {routed}"
+
+    assert len(set(routed.values())) == 5, (
+        f"expected all five workers exercised, got {sorted(set(routed.values()))}"
+    )
 
 
 def test_async_pipeline_matches_sync_pipeline_on_a_zero_balance_invoice(monkeypatch):

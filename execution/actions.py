@@ -43,14 +43,21 @@ def create_payment_link_with_retry(
             return result
 
         except RateLimitError:
-            wait = 2 ** attempt   # attempt 0 → 1s, attempt 1 → 2s, attempt 2 → 4s
+            # No sleep after the final attempt: the loop is about to exit and
+            # raise MaxRetriesExceeded, so backing off first only delays the
+            # failure the caller is already going to get. `wait_seconds: 0` on
+            # the last event records that honestly rather than logging a delay
+            # that was never served.
+            is_last_attempt = attempt == max_retries - 1
+            wait = 0 if is_last_attempt else 2 ** attempt  # 1s, then 2s
             log_audit_event(invoice_id, "api_retry", {
                 "action": "create_payment_link",
                 "attempt": attempt + 1,
                 "wait_seconds": wait,
                 "reason": "rate_limit_429"
             })
-            time.sleep(wait)
+            if wait:
+                time.sleep(wait)
 
         except ServerError as e:
             # Don't retry 5xx — it's Razorpay's problem, surface it immediately

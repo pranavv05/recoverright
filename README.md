@@ -41,26 +41,44 @@ RecoverRight is an autonomous B2B receivables recovery agent that processes a ba
 ![RecoverRight Architecture](architecture.png)
 
 ```
-Batch of overdue invoices
+Batch of overdue invoices   (JSON dataset | CSV upload | Razorpay API sync)
         │
-[CODE]  Detect at-risk          → filter not-yet-worth-acting-on
+[CODE]  Detect at-risk           → filter not-yet-worth-acting-on
         │
-[LLM]   Diagnose                → cause + evidence tier (Known/Inference/Unknown) + cited evidence
+        │   ┌─────────────── ReAct diagnosis: two sequential LLM calls ──────────────┐
+[LLM]   │   Call 1 — Signal extraction   → observe only, never conclude: engagement,
+        │                                  payment-history trend, content signal,
+        │                                  willingness to pay, commitment, …
+[LLM]   │   Call 2 — Reasoning chain     → Thought 1..5 in the open, THEN a cause +
+        │                                  evidence tier (Known/Inference/Unknown) +
+        │                                  cited evidence + a proposed action
+        │   └───────────────────────────────────────────────────────────────────────┘
+        │        every field validated against a whitelist; anything unrecognised
+        │        degrades to the most cautious value before it reaches policy
         │
-[LLM]   Recommend intervention  → proposes only, never executes
+[CODE]  POLICY ENGINE            → ALLOW / BLOCK / REQUIRE_HUMAN
+        │                          14 rules, first-match-wins, deterministic
         │
-[CODE]  POLICY ENGINE           → ALLOW / BLOCK / REQUIRE_HUMAN
-        │          │         │
-     Execute    Don't act  Route to human
-  (Razorpay API)
+[CODE]  ORCHESTRATOR             → routes the decision to exactly one worker.
+        │                          Deterministic table lookup, no LLM at this layer.
         │
-[CODE]  Reconcile               → poll Razorpay; recovery counts ONLY on
-                                  confirmed amount_paid (the only writer of
-                                  amount_recovered_paise)
+   ┌────┴─────┬──────────┬──────────┬─────────────┐
+PaymentLink Escalation  Block      Wait      Information
+ (Razorpay)  (human,    (records   (schedules (drafts, never
+     │        priorit-   refusal,   re-check)  sends)
+     │        ised)      contacts
+     │                   nobody)
+     │
+[CODE]  Reconcile                → poll Razorpay; recovery counts ONLY on
+        │                          confirmed amount_paid (the only writer of
+        │                          amount_recovered_paise)
         │
-[CODE]  Audit trail             → every decision logged: wanted / allowed / did / result
+[CODE]  Audit trail              → every decision logged: wanted / allowed / did / result
         │
-[CODE]  Metrics                 → honest recovery rate on ground-truthed held-out set
+        ├─ [CODE] Client health scoring → per-client risk tier, from the batch's own
+        │                                 diagnoses. Runs after the batch, never during.
+        ├─ [CODE] Batch analytics       → recovery by scenario, rule frequency, cohorts
+        └─ [CODE] Metrics               → honest recovery rate on ground-truthed held-out set
 ```
 
 Reconciliation runs inline in `process_invoice`, immediately after every
@@ -76,6 +94,61 @@ Every recommendation passes through the policy engine, which is deterministic
 and testable, and no model output can loosen a decision — only tighten one. See
 § Policy Engine for exactly which two rules read model output and why that is
 still safe.
+
+**Reasoning happens in the open, across two calls.** Diagnosis is not one
+forward pass. Call 1 extracts observable signals and is explicitly forbidden
+from concluding anything — engagement, payment-history trend, whether a
+specific factual claim was made, willingness to pay, whether a commitment
+named a date. Call 2 receives those signals and works through a fixed
+Thought 1..5 chain — engagement, then content, then payment history, then an
+explicit evidence-quality assessment, then cause and action — before it is
+allowed to commit to a conclusion. Splitting observation from interpretation
+stops the model settling on a cause and then retrofitting evidence to it, and
+the five Thoughts are persisted to the audit trail and rendered per invoice in
+the dashboard, so a reviewer reads the reasoning rather than inferring it from
+the verdict. Both calls are validated field-by-field against a whitelist on the
+way out; an unrecognised value degrades to the most cautious one and the
+model's original text is preserved under `*_raw`. See `diagnosis/prompts.py`.
+
+**Execution is five specialised workers behind a deterministic router.** Once
+the policy engine has decided, an orchestrator routes that decision to exactly
+one worker — `PaymentLinkWorker`, `EscalationWorker`, `BlockWorker`,
+`WaitWorker`, or `InformationWorker` — each with its own audit vocabulary.
+Routing is a table lookup on the decision, not a model call, so the execution
+path is reproducible even though the diagnosis above it is sampled. A BLOCK or
+REQUIRE_HUMAN routes on the *decision alone* and never consults the
+recommended action, so no action string can talk its way past a refusal. Two
+properties are structural rather than remembered: `BlockWorker` has no branch
+that contacts anyone, and `InformationWorker` writes a draft whose status is
+`draft_created` and never `sent`. A worker contains its own failures and
+returns a result dict describing them, so one invoice's Razorpay outage cannot
+take down a batch. See `execution/workers.py`.
+
+**The batch runs concurrently, and the rate limiter is the interesting part.**
+Invoices are independent — no invoice's diagnosis, decision, or execution reads
+anything another invoice wrote — so `run_batch_async` puts many in flight at
+once, bounded by a semaphore on LLM calls and a connection pool on database
+writes. This took a 52-invoice batch from roughly 5–7 minutes to roughly
+70–119 seconds. Getting there needed four mechanisms rather than one, because
+the obvious one is insufficient: a semaphore caps requests *in flight* while a
+rate limit counts requests *started* per unit time, and those only coincide
+when latency is constant. Full-jitter backoff, a cooldown shared across every
+task, an adaptive pacer that bounds the interval between request starts, and a
+serial sweep for stragglers are documented in § Limitations.
+
+**Client health scoring, with zero LLM dependency.** After a batch completes,
+`evaluation/health_scorer.py` rolls every invoice for a client up into one risk
+tier — `critical`, `at_risk`, `watch`, `healthy` — plus a payment trend and a
+plain-English pattern description. It reads only what the pipeline already
+wrote (a cause string, a paise amount, a day count, a history list), so the
+same batch always produces the same scores; rolling fixed facts into a tier is
+arithmetic and table lookups, not judgment. It also raises a **Razorpay Capital
+lead flag**: a client whose dominant cause is `cash_flow_delay`, with no
+disputes and no legal threats, whose history was reliable and has recently
+deteriorated, is short on working capital rather than unwilling to pay. The
+flag names the pattern and explicitly does not make a credit decision. Scoring
+runs strictly after a batch and never feeds back into the pipeline that
+produced its inputs.
 
 **Evidence-honest diagnosis.** The system labels every diagnosis with a confidence tier — Known, Strong Inference, or Unknown — and cites the evidence. Unknown invoices route to information-gathering, never to aggressive action.
 
@@ -98,13 +171,15 @@ application code.
 
 | Layer | Choice |
 |---|---|
-| Backend / orchestration | Python — batch pipeline plus a FastAPI read API for the dashboard |
-| Agent loop | Hand-rolled state machine (readable over clever) |
+| Backend / orchestration | Python — concurrent `asyncio` batch pipeline plus a FastAPI read API for the dashboard |
+| Agent loop | Hand-rolled orchestrator + five specialised execution workers, deterministic routing (readable over clever) |
+| Reasoning | Two-call ReAct — signal extraction, then a visible Thought 1..5 chain |
 | LLM | NVIDIA NIM (`meta/llama-3.1-8b-instruct`), structured JSON output |
-| Database | PostgreSQL (Docker) |
-| Payments | Razorpay test-mode Payment Links API |
-| Frontend | React dashboard |
+| Database | PostgreSQL (Docker) — sync connections plus an async pool for the batch |
+| Payments | Razorpay test-mode Payment Links + Invoices APIs |
+| Frontend | React + Vite dashboard — Invoices, Client Health, Analytics |
 | Infra | Docker Compose |
+| Testing | pytest — 802 tests, 87% line coverage on application code. Four call the real NVIDIA NIM API and skip without a key; `-m "not llm"` deselects them. No test ever calls a real Razorpay account |
 | Money handling | Integer paise, never floats |
 
 ---
@@ -265,6 +340,37 @@ Click **Download Sample CSV** to fetch `data/sample_invoices.csv` and see the ex
 If required columns are missing, the upload is rejected with a message listing exactly which ones. A row with an unparseable `amount` rejects the whole upload with the offending row number. A duplicate `invoice_id` within the same file is skipped with a warning rather than failing the upload.
 
 ---
+
+## Dashboard
+
+`uvicorn api.main:app --port 8000` plus `npm run dev` in `frontend/`. React +
+Vite, reading the same tables the batch writes. Three tabs:
+
+**Invoices** — one row per processed invoice: evidence tier, diagnosed cause
+with the evidence the model cited, the policy decision with the rule that
+fired, and the recorded outcome. The outcome is read from the execution event
+in the audit trail, not re-derived from the decision, so the cell shows what
+actually happened. Selecting a row opens the full audit trail, and two panels
+above it:
+
+- **WHY NOT** — on every BLOCK and REQUIRE_HUMAN, states plainly what the agent
+  wanted to do and which rule stopped it. The refusals are the product, so they
+  get the most legible explanation on the page.
+- **REASONING CHAIN** — the Call 1 signals followed by all five Thoughts from
+  Call 2, tinted by the decision they led to.
+
+**Client Health** — every client's risk tier, outstanding total, average days
+overdue, payment trend, and pattern description, sorted worst-first. Razorpay
+Capital candidates carry a `CANDIDATE` badge whose tooltip gives the reasoning.
+Clicking a client filters the Invoices tab to that client.
+
+**Analytics** — recovery rate by scenario, the most-fired policy rules, clients
+with more than one invoice, and average days overdue by diagnosed cause.
+
+Ingestion controls sit above the tabs: **Sync from Razorpay** pulls overdue
+invoices from the connected account, and **Upload Invoice CSV** accepts a
+Tally / Zoho Books / Excel export. Both run the same pipeline as a JSON batch
+and both are always simulated — neither creates a live payment link.
 
 ## Dataset
 
@@ -613,34 +719,73 @@ This is a buildathon submission, not a production system. Honest gaps:
 ```
 recoverright/
   api/
-    main.py              # Orchestrator (process_invoice / run_batch), CSV upload,
-                         # Razorpay sync, and the FastAPI read API the dashboard consumes
-  audit/
-    trail.py             # Single point for all audit_log writes
-  database/
-    connection.py        # Postgres connection
-    schema.sql           # Three-table schema
-  data/
-    seen.json            # 52 invoices — used during development
-    held_out.json        # 41 invoices — evaluation set (see the disclosure under § Dataset)
-    all_invoices.json    # Full 93-record reference set (seen + held-out)
-    sample_invoices.csv  # Sample CSV for the merchant upload feature
-  diagnosis/
-    diagnoser.py         # LLM diagnosis — evidence-tiered, structured JSON
-    prompts.py           # System prompt + user message template
-  evaluation/
-    run.py               # Eval runner (--repeat N for a range, not a point estimate)
-    metrics.py           # Metric computations — safety measures reported in pairs
-  execution/
-    actions.py           # Action dispatcher + retry with backoff
-    razorpay_client.py   # Razorpay test-mode HTTP wrapper — payment links + fetch_overdue_invoices
-    test_razorpay_client.py  # fetch_overdue_invoices pagination/filtering/error-mapping tests
+    main.py                  # The pipeline every entry point goes through
+                             # (process_invoice / process_invoice_async), the
+                             # concurrent batch runner, CSV upload, Razorpay
+                             # sync, and the FastAPI read API
   policy/
-    engine.py            # Deterministic policy evaluator
-    rules.py             # Thresholds, action whitelists, content patterns
-    test_engine.py       # 131 unit tests — invariants, adversarial content,
-                         # real dataset fixtures, whole-corpus properties
+    engine.py                # Deterministic policy evaluator — 14 rules, first-match-wins
+    rules.py                 # Thresholds, action whitelists, content-detection lexicons
+    test_engine.py           # 131 unit tests — invariants, adversarial content,
+                             # real dataset fixtures, whole-corpus properties
+    test_react.py            # Two-call diagnosis: signal extraction, ReAct output
+                             # parsing, reasoning-trace audit logging
+  diagnosis/
+    diagnoser.py             # Two-call ReAct diagnosis, sync + async. Whitelist
+                             # validation, jittered backoff, shared cooldown,
+                             # adaptive request pacer
+    prompts.py               # Two system prompts + two user templates — Call 1
+                             # signal extraction, Call 2 reasoning chain
+  execution/
+    workers.py               # Orchestrator + the five execution workers, sync + async
+    actions.py               # Retry with backoff; reconcile_payment — the only
+                             # writer of a non-zero amount_recovered_paise
+    razorpay_client.py       # Razorpay test-mode HTTP wrapper — payment links,
+                             # verification, fetch_overdue_invoices
+    test_workers.py          # Worker routing and audit vocabulary
+    test_razorpay_client.py  # Pagination, filtering, error mapping
+  evaluation/
+    run.py                   # Eval runner (--repeat N for a range, not a point estimate)
+    metrics.py               # Metric computations — safety measures reported in pairs
+    health_scorer.py         # Client risk tiers + Razorpay Capital lead flag. No LLM
+    analytics.py             # Batch analytics — read-only aggregates
+    test_health_scorer.py    # Scoring and trend computation on synthetic clients
+  audit/
+    trail.py                 # Single point for all invoices / audit_log / recoveries writes
+  database/
+    connection.py            # Sync connection + async pool (loop-affinity aware)
+    schema.sql               # Four-table schema + the recovered-only-when-verified CHECK
+  tests/                     # Application-level suite — no test calls a real LLM
+    conftest.py              # Shared fixtures; DB tests are additive, never destructive
+    test_policy_engine.py        test_policy_adversarial.py
+    test_pipeline_e2e.py         test_parallel.py
+    test_workers.py              test_diagnosis.py
+    test_api_endpoints.py        test_audit_trail.py
+    test_csv_upload.py           test_razorpay_sync.py
+    test_financial.py            test_health_scoring.py
+    test_data_integrity.py       test_readme_claims.py
+    test_reconciliation.py       # the five guards on the only writer of money
+    test_metrics.py              # the scorecard's own arithmetic
+    test_execution_retry.py      # what is retried, what is surfaced immediately
+    test_async_retry.py          # backoff, shared cooldown, adaptive pacer
+    test_razorpay_links.py       # link creation + verification, status mapping
+    test_evaluation_runner.py    # retry-once-then-exclude, run aggregation
+  frontend/                  # React + Vite dashboard
+    src/App.jsx              # Invoices / Client Health / Analytics tabs,
+                             # WHY NOT and REASONING CHAIN panels
+  demo/                      # Pitch-video scripts — recovery, blocked, API
+                             # failure, Razorpay sync
+  data/
+    seen.json                # 52 invoices — used during development
+    held_out.json            # 41 invoices — evaluation set (see the disclosure under § Dataset)
+    all_invoices.json        # Full 93-record reference set (seen + held-out)
+    sample_invoices.csv      # Sample CSV for the merchant upload feature
+  conftest.py                # Repo-root fixtures — the database guard, which
+                             # test modules outside tests/ also need
+  architecture.png           # Full architecture diagram
+  architecture_simple.png    # Simplified diagram for the pitch video
   docker-compose.yml
+  pyproject.toml             # pytest config — testpaths, markers (slow / db / llm)
   requirements.txt
   .env.example
 ```

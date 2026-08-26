@@ -179,25 +179,10 @@ def mock_llm_response():
 # Database fixtures
 # ─────────────────────────────────────────────────────────────────────────
 
-def database_is_reachable() -> bool:
-    """True when DATABASE_URL points at a Postgres that answers."""
-    if not os.environ.get("DATABASE_URL"):
-        return False
-    try:
-        from database.connection import get_connection
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-        return True
-    except Exception:
-        return False
-
-
-@pytest.fixture(scope="session")
-def require_database():
-    """Skips the test when no database is reachable, rather than erroring."""
-    if not database_is_reachable():
-        pytest.skip("no database reachable at DATABASE_URL")
+# `database_is_reachable()` and the `require_database` fixture live in the
+# repo-root conftest.py, not here: test modules also live in policy/,
+# execution/ and evaluation/, and a guard defined in this file would be
+# invisible to all three. Fixtures below inherit it from there.
 
 
 @pytest.fixture
