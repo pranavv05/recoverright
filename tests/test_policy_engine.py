@@ -149,21 +149,21 @@ def test_zero_outstanding_skips_processing_before_policy_engine(sample_invoice, 
     is where the guard lives: `process_invoice` returns "skipped" before
     diagnosis, so a zero balance costs neither an LLM call nor a decision.
     """
-    import api.main as main
+    import api.pipeline as pipeline
 
     invoice = dict(sample_invoice, partial_payment_received_paise=sample_invoice["amount_paise"])
 
     events = []
-    monkeypatch.setattr(main, "insert_invoice", lambda inv: None)
+    monkeypatch.setattr(pipeline, "insert_invoice", lambda inv: None)
     monkeypatch.setattr(
-        main, "log_audit_event",
+        pipeline, "log_audit_event",
         lambda invoice_id, event_type, payload: events.append(event_type),
     )
-    monkeypatch.setattr(main, "diagnose", lambda *a, **k: pytest.fail(
+    monkeypatch.setattr(pipeline, "diagnose", lambda *a, **k: pytest.fail(
         "diagnose() must not be called for a zero-outstanding invoice"
     ))
 
-    result = main.process_invoice(invoice, api_key="unused")
+    result = pipeline.process_invoice(invoice, api_key="unused")
 
     assert result["status"] == "skipped"
     assert events == ["skipped"]

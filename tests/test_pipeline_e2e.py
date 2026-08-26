@@ -15,7 +15,7 @@ regenerating it, for the same reason.
 
 import pytest
 
-import api.main as main
+import api.pipeline as pipeline
 from audit.trail import get_audit_trail
 from database.connection import get_connection
 from tests.conftest import load_dataset, unique_invoice_id
@@ -38,7 +38,7 @@ def run_pipeline(mocked_pipeline_llm, db_cleanup, sample_invoice):
         invoice["invoice_id"] = db_cleanup(unique_invoice_id(invoice_id_label))
         invoice.update(invoice_fields)
 
-        result = main.process_invoice(invoice, api_key="test-key", rzp_client=None)
+        result = pipeline.process_invoice(invoice, api_key="test-key", rzp_client=None)
         trail = get_audit_trail(invoice["invoice_id"])
         return result, [event["event_type"] for event in trail], invoice
 
@@ -250,7 +250,7 @@ def test_same_client_disputed_and_clean_handled_independently(
 
     disputed_id = db_cleanup(unique_invoice_id("multi-disputed"))
     mocked_pipeline_llm(diagnosed_cause="dispute", recommended_action="escalate_to_human")
-    disputed = main.process_invoice(
+    disputed = pipeline.process_invoice(
         dict(sample_invoice,
              invoice_id=disputed_id,
              client_name=client,
@@ -262,7 +262,7 @@ def test_same_client_disputed_and_clean_handled_independently(
     mocked_pipeline_llm(
         diagnosed_cause="payment_link_failure", recommended_action="create_payment_link"
     )
-    clean = main.process_invoice(
+    clean = pipeline.process_invoice(
         dict(sample_invoice,
              invoice_id=clean_id,
              client_name=client,
@@ -328,10 +328,10 @@ def test_diagnosis_failure_is_recorded_and_does_not_crash_the_batch(
     def exploding_diagnose(invoice, api_key=None):
         raise ValueError("simulated model outage")
 
-    monkeypatch.setattr(main, "diagnose", exploding_diagnose)
+    monkeypatch.setattr(pipeline, "diagnose", exploding_diagnose)
     invoice_id = db_cleanup(unique_invoice_id("failure"))
 
-    result = main.process_invoice(
+    result = pipeline.process_invoice(
         dict(sample_invoice, invoice_id=invoice_id), api_key="test-key", rzp_client=None,
     )
     # Still flagged as a failure, so the evaluation runner keeps excluding it

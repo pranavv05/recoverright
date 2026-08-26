@@ -8,6 +8,48 @@ Built for the **Razorpay AI Buildathon — Track 03: AI Revenue Recovery**
 
 ---
 
+**What it is.** An autonomous agent for overdue B2B invoices. It diagnoses *why*
+each invoice is unpaid, proposes the least-risky recovery action, and executes
+it only if a deterministic 14-rule policy engine permits — so a disputed invoice
+is never chased, a legal threat never gets an automated reply, and a ₹50L
+strategic account never gets collected on without a human. Every decision,
+including every refusal, is on the audit trail.
+
+**Demo video:** _(link pending — add before submitting)_
+
+**60-second run** (no Razorpay account, no payments, no LLM spend):
+
+```bash
+git clone https://github.com/pranavv05/recoverright && cd recoverright
+cp .env.example .env                  # add your free NVIDIA NIM key
+docker compose up -d                  # Postgres
+pip install -r requirements.txt
+python -m pytest -m "not llm"         # 700+ tests, no API keys or DB needed
+python -m api.main                    # batch over 52 invoices, simulated
+uvicorn api.main:app --port 8000      # then: cd frontend && npm i && npm run dev
+```
+
+**Headline results** — three runs against a 41-invoice held-out set
+([full table](#evaluation-results)):
+
+| | |
+|---|---|
+| Inappropriate actions (ALLOW on an invoice needing a human) | **0** — all 3 runs |
+| Hard stops correctly blocked | **100%** (5/5) — all 3 runs |
+| Human-required invoices correctly escalated | **100%** — all 3 runs |
+| Cause diagnosis accuracy | 53% |
+| Over-escalations (safe invoices refused) | 5–6 of 14 |
+
+Those two halves are the point, and they belong together: the safety numbers
+were **identical across all three runs** — on the very runs where the 8B model
+got the cause wrong roughly half the time. The engine holds while the model it
+depends on is unreliable. Zero inappropriate actions is only meaningful next to
+the over-escalation count, because an engine that escalated all 41 would also
+score zero. See § Evaluation Results for the full accounting, including what
+this system still gets wrong.
+
+---
+
 ## The Problem
 
 Every month, thousands of Indian businesses send out invoices and wait. Some get paid on time. Many don't. When businesses chase overdue invoices, they treat every single one the same way — one generic reminder, sent to everyone.
@@ -196,7 +238,7 @@ application code.
 ### Setup
 
 ```bash
-git clone https://github.com/your-username/recoverright
+git clone https://github.com/pranavv05/recoverright
 cd recoverright
 
 # Configure environment
@@ -236,6 +278,9 @@ python -m pytest policy/test_engine.py -v
 # and spends nothing.
 python -m pytest
 python -m pytest -m "not llm"
+
+# Frontend tests — no backend, no API keys, no database
+cd frontend && npm install && npm run test:coverage && cd ..
 
 # Evaluation against the held-out set, three runs for a range not a point
 python -m evaluation.run --dataset data/held_out.json --repeat 3
@@ -719,10 +764,19 @@ This is a buildathon submission, not a production system. Honest gaps:
 ```
 recoverright/
   api/
-    main.py                  # The pipeline every entry point goes through
-                             # (process_invoice / process_invoice_async), the
-                             # concurrent batch runner, CSV upload, Razorpay
-                             # sync, and the FastAPI read API
+    main.py                  # Entry point only — `uvicorn api.main:app` and
+                             # `python -m api.main`. No decision logic here
+    pipeline.py              # The pipeline every entry point goes through:
+                             # process_invoice / process_invoice_async, plus the
+                             # sequential and concurrent batch runners and the
+                             # serial sweep that retries an undiagnosed invoice
+    csv_import.py            # Merchant CSV → invoice dicts. Decimal money
+                             # parsing, row cap, per-row warnings
+    razorpay_import.py       # Razorpay Invoices API → invoice dicts
+    queries.py               # The read layer: invoice rows, metrics, client
+                             # health. No writes, no decisions
+    routes.py                # The FastAPI surface — HTTP concerns only. Every
+                             # handler validates, calls one function, maps errors
   policy/
     engine.py                # Deterministic policy evaluator — 14 rules, first-match-wins
     rules.py                 # Thresholds, action whitelists, content-detection lexicons
@@ -771,8 +825,17 @@ recoverright/
     test_razorpay_links.py       # link creation + verification, status mapping
     test_evaluation_runner.py    # retry-once-then-exclude, run aggregation
   frontend/                  # React + Vite dashboard
-    src/App.jsx              # Invoices / Client Health / Analytics tabs,
-                             # WHY NOT and REASONING CHAIN panels
+    src/App.jsx              # Shell — data fetching, tab state, client filter
+    src/api.js               # Shared axios instance + one error-message rule
+    src/lib/                 # format.js (paise → ₹, snake_case → prose),
+                             # constants.js (backend tokens → labels/classes)
+    src/components/          # InvoiceTable, InvoiceCells, DetailPanel,
+                             # WhyNot, ReasoningChain, ClientHealthTab,
+                             # AnalyticsTab, CsvUpload, RazorpaySync, Counter
+    src/**/*.test.{js,jsx}   # 191 Vitest + React Testing Library tests,
+                             # ~99% statement coverage (thresholds enforced
+                             # in vite.config.js). See frontend/README.md
+    src/test/fixtures.js     # Payloads shaped like the real API responses
   demo/                      # Pitch-video scripts — recovery, blocked, API
                              # failure, Razorpay sync
   data/
@@ -782,12 +845,19 @@ recoverright/
     sample_invoices.csv      # Sample CSV for the merchant upload feature
   conftest.py                # Repo-root fixtures — the database guard, which
                              # test modules outside tests/ also need
+  docs/
+    architecture.py          # Renders both diagrams below. They were binaries
+                             # with no source, which is how the full one drifted
+                             # to claiming rule counts the engine never had
   architecture.png           # Full architecture diagram
   architecture_simple.png    # Simplified diagram for the pitch video
+  .github/workflows/ci.yml   # Both suites + lint + build, on every push and PR.
+                             # No secrets: LLM tests deselected, DB tests skip
   docker-compose.yml
   pyproject.toml             # pytest config — testpaths, markers (slow / db / llm)
   requirements.txt
   .env.example
+  LICENSE                    # MIT
 ```
 
 ---

@@ -17,7 +17,7 @@ from decimal import Decimal
 
 import pytest
 
-from api.main import MAX_INVOICE_PAISE, _rupees_to_paise, parse_csv_upload
+from api.csv_import import MAX_INVOICE_PAISE, _rupees_to_paise, parse_csv_upload
 from database.connection import get_connection
 from tests.conftest import unique_invoice_id
 

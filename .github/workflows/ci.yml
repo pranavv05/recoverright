@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  backend:
+    name: Python suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # `-m "not llm"` deselects the four tests that call the real NVIDIA NIM
+      # API, so a CI run is deterministic and spends nothing. Tests marked
+      # `db` skip themselves when no Postgres is reachable, which is the case
+      # here — everything else runs with no services and no secrets.
+      - name: pytest
+        run: python -m pytest -m "not llm" -q
+
+  frontend:
+    name: Dashboard suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      # Coverage thresholds live in vite.config.js, so a drop below them
+      # fails this step rather than passing quietly.
+      - run: npm run test:coverage
+
+      - run: npm run build

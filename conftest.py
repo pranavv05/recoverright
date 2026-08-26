@@ -21,7 +21,7 @@ import pytest
 from dotenv import load_dotenv
 
 # The application calls load_dotenv() at import time, so a test file that
-# happens to import api.main gets DATABASE_URL for free and one that does not
+# happens to import api.pipeline gets DATABASE_URL for free and one that does not
 # silently skips every database test. Loading it at the root makes the
 # environment identical no matter which subset of the suite is selected.
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))

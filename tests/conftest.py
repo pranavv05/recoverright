@@ -32,7 +32,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
 # The application calls load_dotenv() at import time, so a test file that
-# happens to import api.main gets DATABASE_URL for free and one that does not
+# happens to import api.pipeline gets DATABASE_URL for free and one that does not
 # silently skips every database test. Loading it here makes the environment
 # identical no matter which subset of the suite is selected.
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
@@ -261,7 +261,7 @@ def fastapi_test_client():
 
 @pytest.fixture
 def mocked_pipeline_llm(monkeypatch):
-    """Replaces `api.main.diagnose` with a canned diagnosis, and pins a fake API key.
+    """Replaces `api.pipeline.diagnose` with a canned diagnosis, and pins a fake API key.
 
     Every endpoint that ingests invoices (CSV upload, Razorpay sync, batch)
     runs one real LLM call per row. This fixture is what stops the test suite
@@ -272,7 +272,10 @@ def mocked_pipeline_llm(monkeypatch):
     pipeline down a specific branch (a dispute, an unknown evidence tier)
     without needing the model to cooperate.
     """
-    import api.main as main
+    # Patched on api.pipeline, not on api.main: that is the module
+    # `process_invoice` resolves the name in, and patching the re-export
+    # would look like it worked while the real call still went out.
+    import api.pipeline as pipeline
 
     current = {
         "diagnosed_cause": "forgotten_invoice",
@@ -298,7 +301,7 @@ def mocked_pipeline_llm(monkeypatch):
         }
         return diagnosis
 
-    monkeypatch.setattr(main, "diagnose", fake_diagnose)
+    monkeypatch.setattr(pipeline, "diagnose", fake_diagnose)
     monkeypatch.setenv("NVIDIA_API_KEY", "test-key-not-a-real-credential")
 
     def set_diagnosis(**fields):

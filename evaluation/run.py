@@ -1,6 +1,6 @@
 """Evaluation runner.
 
-Runs the held-out set through `api.main.process_invoice` — the same function
+Runs the held-out set through `api.pipeline.process_invoice` — the same function
 the CLI batch, the dashboard, and the CSV upload use. There is no separate
 evaluation code path, so a metric here cannot be produced by logic the
 product does not run.
@@ -20,7 +20,7 @@ import time
 
 from dotenv import load_dotenv
 
-from api.main import process_invoice
+from api.pipeline import process_invoice
 from evaluation.metrics import compute_metrics
 
 log = logging.getLogger(__name__)

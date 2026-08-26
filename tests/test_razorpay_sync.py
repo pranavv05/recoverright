@@ -1,4 +1,4 @@
-"""Tests for api.main._razorpay_invoice_to_internal — the Razorpay -> internal
+"""Tests for api.razorpay_import._razorpay_invoice_to_internal — the Razorpay -> internal
 invoice schema mapping used by POST /api/sync-razorpay.
 
 Offline: no database, no Razorpay account, no LLM call. Only the pure mapping
@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from api.main import _razorpay_invoice_to_internal
+from api.razorpay_import import _razorpay_invoice_to_internal
 
 
 def _raw_invoice(**overrides):

@@ -231,7 +231,7 @@ def test_diagnose_full_react_call_on_disputed_invoice():
 def test_reasoning_trace_logged_to_audit_trail(require_database):
     """process_invoice() must write a reasoning_trace audit event with all 5
     thoughts populated, for a real invoice run through the full pipeline."""
-    from api.main import process_invoice
+    from api.pipeline import process_invoice
     from audit.trail import get_audit_trail
 
     invoice = load_invoice("INV-1001")

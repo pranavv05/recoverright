@@ -2,7 +2,7 @@
 
 Creates real invoices in the connected Razorpay test-mode account via
 POST /v1/invoices, then calls the exact same handler POST /api/sync-razorpay
-runs (api.main.api_sync_razorpay) so the demo exercises the real
+runs (api.routes.api_sync_razorpay) so the demo exercises the real
 fetch -> map -> diagnose -> policy -> execute -> audit pipeline against real
 Razorpay-issued invoice IDs, customer data, and payment links.
 
@@ -120,8 +120,8 @@ def main():
           "(fetch_overdue_invoices monkeypatched to return the invoices above, "
           "aged into the past — see module docstring)...")
     with patch.object(RazorpayClient, "fetch_overdue_invoices", return_value=simulated):
-        import api.main as main_module
-        result = main_module.api_sync_razorpay()
+        import api.routes as routes_module
+        result = routes_module.api_sync_razorpay()
 
     print("\n--- /api/sync-razorpay response ---")
     import json as _json

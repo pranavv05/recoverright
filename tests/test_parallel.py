@@ -31,7 +31,7 @@ import time
 
 import pytest
 
-import api.main as main
+import api.pipeline as pipeline
 import diagnosis.diagnoser as diagnoser
 import execution.workers as workers
 from database.connection import (
@@ -341,16 +341,16 @@ def test_one_failing_diagnosis_does_not_stop_the_other_invoices(monkeypatch):
     async def fake_insert(invoice):
         return None
 
-    monkeypatch.setattr(main, "diagnose_async", fake_diagnose_async)
-    monkeypatch.setattr(main, "log_audit_event_async", fake_audit)
-    monkeypatch.setattr(main, "insert_invoice_async", fake_insert)
+    monkeypatch.setattr(pipeline, "diagnose_async", fake_diagnose_async)
+    monkeypatch.setattr(pipeline, "log_audit_event_async", fake_audit)
+    monkeypatch.setattr(pipeline, "insert_invoice_async", fake_insert)
     monkeypatch.setattr(workers, "log_audit_event_async", fake_audit)
 
     invoices = [make_invoice(i) for i in range(6)]
 
     async def scenario():
         return await asyncio.gather(
-            *(main.process_invoice_async(inv, "fake-key") for inv in invoices),
+            *(pipeline.process_invoice_async(inv, "fake-key") for inv in invoices),
             return_exceptions=True,
         )
 
@@ -499,12 +499,12 @@ def test_run_batch_async_returns_one_result_per_invoice(monkeypatch, tmp_path):
         return None
 
     monkeypatch.setenv("NVIDIA_API_KEY", "test-key-not-used")
-    monkeypatch.setattr(main, "diagnose_async", fake_diagnose_async)
-    monkeypatch.setattr(main, "log_audit_event_async", noop_audit)
-    monkeypatch.setattr(main, "insert_invoice_async", noop_insert)
+    monkeypatch.setattr(pipeline, "diagnose_async", fake_diagnose_async)
+    monkeypatch.setattr(pipeline, "log_audit_event_async", noop_audit)
+    monkeypatch.setattr(pipeline, "insert_invoice_async", noop_insert)
     monkeypatch.setattr(workers, "log_audit_event_async", noop_audit)
 
-    results = run(main.run_batch_async(str(dataset_path)))
+    results = run(pipeline.run_batch_async(str(dataset_path)))
 
     assert len(results) == len(dataset) == 10
 
@@ -553,12 +553,12 @@ def test_run_batch_async_respects_the_limit_argument(monkeypatch, tmp_path):
         return None
 
     monkeypatch.setenv("NVIDIA_API_KEY", "test-key-not-used")
-    monkeypatch.setattr(main, "diagnose_async", fake_diagnose_async)
-    monkeypatch.setattr(main, "log_audit_event_async", noop_audit)
-    monkeypatch.setattr(main, "insert_invoice_async", noop_insert)
+    monkeypatch.setattr(pipeline, "diagnose_async", fake_diagnose_async)
+    monkeypatch.setattr(pipeline, "log_audit_event_async", noop_audit)
+    monkeypatch.setattr(pipeline, "insert_invoice_async", noop_insert)
     monkeypatch.setattr(workers, "log_audit_event_async", noop_audit)
 
-    results = run(main.run_batch_async(str(dataset_path), limit=3))
+    results = run(pipeline.run_batch_async(str(dataset_path), limit=3))
 
     assert len(results) == 3
 
@@ -681,18 +681,18 @@ def test_async_pipeline_matches_sync_pipeline_given_the_same_diagnosis(
         return None
 
     # Synchronous run.
-    monkeypatch.setattr(main, "diagnose", fake_diagnose)
-    monkeypatch.setattr(main, "log_audit_event", fake_log)
-    monkeypatch.setattr(main, "insert_invoice", fake_insert)
+    monkeypatch.setattr(pipeline, "diagnose", fake_diagnose)
+    monkeypatch.setattr(pipeline, "log_audit_event", fake_log)
+    monkeypatch.setattr(pipeline, "insert_invoice", fake_insert)
     monkeypatch.setattr(workers, "log_audit_event", fake_log)
-    sync_result = main.process_invoice(invoice, "fake-key")
+    sync_result = pipeline.process_invoice(invoice, "fake-key")
 
     # Asynchronous run.
-    monkeypatch.setattr(main, "diagnose_async", fake_diagnose_async)
-    monkeypatch.setattr(main, "log_audit_event_async", fake_log_async)
-    monkeypatch.setattr(main, "insert_invoice_async", fake_insert_async)
+    monkeypatch.setattr(pipeline, "diagnose_async", fake_diagnose_async)
+    monkeypatch.setattr(pipeline, "log_audit_event_async", fake_log_async)
+    monkeypatch.setattr(pipeline, "insert_invoice_async", fake_insert_async)
     monkeypatch.setattr(workers, "log_audit_event_async", fake_log_async)
-    async_result = run(main.process_invoice_async(invoice, "fake-key"))
+    async_result = run(pipeline.process_invoice_async(invoice, "fake-key"))
 
     assert async_result["policy_decision"] == sync_result["policy_decision"], label
     assert async_result["policy_reasons"] == sync_result["policy_reasons"], label
@@ -727,14 +727,14 @@ def test_equivalence_cases_reach_five_distinct_workers(monkeypatch):
         invoice.update(invoice_overrides)
 
         monkeypatch.setattr(
-            main, "diagnose",
+            pipeline, "diagnose",
             lambda inv, api_key=None, _o=diagnosis_overrides: _fixed_diagnosis(inv, _o),
         )
-        monkeypatch.setattr(main, "log_audit_event", lambda *a, **k: None)
-        monkeypatch.setattr(main, "insert_invoice", lambda inv: None)
+        monkeypatch.setattr(pipeline, "log_audit_event", lambda *a, **k: None)
+        monkeypatch.setattr(pipeline, "insert_invoice", lambda inv: None)
         monkeypatch.setattr(workers, "log_audit_event", lambda *a, **k: None)
 
-        routed[label] = main.process_invoice(invoice, "fake-key")["worker"]
+        routed[label] = pipeline.process_invoice(invoice, "fake-key")["worker"]
 
     assert routed == {
         "payment_link": "payment_link",
@@ -758,8 +758,8 @@ def test_async_pipeline_matches_sync_pipeline_on_a_zero_balance_invoice(monkeypa
     sync_events = []
     async_events = []
 
-    monkeypatch.setattr(main, "log_audit_event", lambda i, e, p: sync_events.append((e, p)))
-    monkeypatch.setattr(main, "insert_invoice", lambda inv: None)
+    monkeypatch.setattr(pipeline, "log_audit_event", lambda i, e, p: sync_events.append((e, p)))
+    monkeypatch.setattr(pipeline, "insert_invoice", lambda inv: None)
 
     async def fake_log_async(i, e, p):
         async_events.append((e, p))
@@ -767,11 +767,11 @@ def test_async_pipeline_matches_sync_pipeline_on_a_zero_balance_invoice(monkeypa
     async def fake_insert_async(inv):
         return None
 
-    monkeypatch.setattr(main, "log_audit_event_async", fake_log_async)
-    monkeypatch.setattr(main, "insert_invoice_async", fake_insert_async)
+    monkeypatch.setattr(pipeline, "log_audit_event_async", fake_log_async)
+    monkeypatch.setattr(pipeline, "insert_invoice_async", fake_insert_async)
 
-    sync_result = main.process_invoice(invoice, "fake-key")
-    async_result = run(main.process_invoice_async(invoice, "fake-key"))
+    sync_result = pipeline.process_invoice(invoice, "fake-key")
+    async_result = run(pipeline.process_invoice_async(invoice, "fake-key"))
 
     assert sync_result == async_result
     assert sync_result["status"] == "skipped"
@@ -811,9 +811,9 @@ def _mock_pipeline(monkeypatch):
         return None
 
     monkeypatch.setenv("NVIDIA_API_KEY", "test-key-not-used")
-    monkeypatch.setattr(main, "diagnose_async", fake_diagnose_async)
-    monkeypatch.setattr(main, "log_audit_event_async", noop_audit)
-    monkeypatch.setattr(main, "insert_invoice_async", noop_insert)
+    monkeypatch.setattr(pipeline, "diagnose_async", fake_diagnose_async)
+    monkeypatch.setattr(pipeline, "log_audit_event_async", noop_audit)
+    monkeypatch.setattr(pipeline, "insert_invoice_async", noop_insert)
     monkeypatch.setattr(workers, "log_audit_event_async", noop_audit)
 
 
@@ -833,9 +833,9 @@ def test_dispatch_runs_the_batch_directly_on_a_compatible_loop(monkeypatch, tmp_
     def exploding_blocking(*args, **kwargs):
         raise AssertionError("should not have been handed to a thread")
 
-    monkeypatch.setattr(main, "run_batch_blocking", exploding_blocking)
+    monkeypatch.setattr(pipeline, "run_batch_blocking", exploding_blocking)
 
-    results = run(main._dispatch_batch_async(dataset_path))
+    results = run(pipeline._dispatch_batch_async(dataset_path))
 
     assert len(results) == 4
 
@@ -853,10 +853,10 @@ def test_dispatch_falls_back_to_a_worker_thread_on_an_incompatible_loop(
 
     with asyncio.Runner(loop_factory=asyncio.ProactorEventLoop) as runner:
         loop = runner.get_loop()
-        assert not main.loop_supports_async_pg(loop), (
+        assert not pipeline.loop_supports_async_pg(loop), (
             "this test is pointless unless the loop really is incompatible"
         )
-        results = runner.run(main._dispatch_batch_async(dataset_path))
+        results = runner.run(pipeline._dispatch_batch_async(dataset_path))
 
     assert len(results) == 4
     assert all(r.get("policy_decision") for r in results)

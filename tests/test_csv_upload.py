@@ -7,7 +7,7 @@ Split deliberately into two halves:
     Everything about column handling, quoting, duplicates and encoding is
     testable here.
   - **Endpoint tests** go through the real FastAPI handler and do write rows.
-    They mock `api.main.diagnose` (never a real LLM call) and clean up after
+    They mock `api.pipeline.diagnose` (never a real LLM call) and clean up after
     themselves, and are marked `db`.
 
 The rule for a bad row is that it must produce a 400 with a message a
@@ -16,7 +16,7 @@ merchant can act on. A 500 means we asked them to debug our stack trace.
 
 import pytest
 
-from api.main import MAX_CSV_ROWS, REQUIRED_CSV_COLUMNS, parse_csv_upload
+from api.csv_import import MAX_CSV_ROWS, REQUIRED_CSV_COLUMNS, parse_csv_upload
 from database.connection import get_connection
 from tests.conftest import unique_invoice_id
 

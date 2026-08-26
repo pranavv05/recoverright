@@ -632,7 +632,7 @@ def diagnose(invoice: dict, api_key: str = None) -> dict:
     audit trail rather than hidden inside a single forward pass.
 
     Returns a normalised diagnosis dict with two extra keys for audit
-    logging — `_reasoning_trace` and `_signals` — which api.main.py must
+    logging — `_reasoning_trace` and `_signals` — which api/pipeline.py must
     strip before the diagnosis reaches the policy engine.
     """
     invoice_id = invoice.get("invoice_id", "?")

@@ -309,7 +309,7 @@ def test_sample_csv_download(fastapi_test_client):
 
 def test_sample_csv_first_line_contains_every_required_column(fastapi_test_client):
     """The template we hand a merchant must satisfy the validator we then apply."""
-    from api.main import REQUIRED_CSV_COLUMNS
+    from api.csv_import import REQUIRED_CSV_COLUMNS
 
     header = fastapi_test_client.get("/api/sample-csv").text.splitlines()[0]
     columns = [c.strip() for c in header.split(",")]
@@ -319,7 +319,7 @@ def test_sample_csv_first_line_contains_every_required_column(fastapi_test_clien
 
 def test_sample_csv_is_accepted_by_the_upload_validator(fastapi_test_client):
     """The round trip: what /api/sample-csv serves, /api/upload-csv must parse."""
-    from api.main import parse_csv_upload
+    from api.csv_import import parse_csv_upload
 
     invoices, warnings = parse_csv_upload(
         fastapi_test_client.get("/api/sample-csv").content
