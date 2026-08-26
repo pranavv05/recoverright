@@ -5,6 +5,7 @@ import ClientHealthTab from './components/ClientHealthTab'
 import Counter from './components/Counter'
 import CsvUpload from './components/CsvUpload'
 import DetailPanel from './components/DetailPanel'
+import EscalationsTab from './components/EscalationsTab'
 import InvoiceTable from './components/InvoiceTable'
 import RazorpaySync from './components/RazorpaySync'
 import { lakhs } from './lib/format'
@@ -27,37 +28,43 @@ export default function App() {
   const [clientFilter, setClientFilter] = useState(null)
   const [analytics, setAnalytics] = useState(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(true)
+  const [escalations, setEscalations] = useState([])
+  const [escalationsLoading, setEscalationsLoading] = useState(true)
 
-  // One round trip for the whole dashboard. The four endpoints are read-only
+  // One round trip for the whole dashboard. The five endpoints are read-only
   // and independent, so they go out together — a serial chain would make the
-  // post-batch refresh four times as slow for no ordering benefit.
+  // post-batch refresh five times as slow for no ordering benefit.
   const fetchAll = useCallback(async () => {
     setLoading(true)
     setHealthLoading(true)
     setAnalyticsLoading(true)
+    setEscalationsLoading(true)
     setError(null)
     try {
-      const [invRes, metRes, healthRes, analyticsRes] = await Promise.all([
+      const [invRes, metRes, healthRes, analyticsRes, escRes] = await Promise.all([
         api.get('/api/invoices'),
         api.get('/api/metrics'),
         api.get('/api/client-health'),
         api.get('/api/analytics'),
+        api.get('/api/escalations'),
       ])
       setInvoices(invRes.data)
       setMetrics(metRes.data)
       setHealthScores(healthRes.data)
       setAnalytics(analyticsRes.data)
+      setEscalations(escRes.data)
     } catch (e) {
       setError(e.message)
     } finally {
       setLoading(false)
       setHealthLoading(false)
       setAnalyticsLoading(false)
+      setEscalationsLoading(false)
     }
   }, [])
 
-  // fetchAll() opens by setting the three loading flags to true. On this mount
-  // that is a no-op: all three already initialise to true, and React bails out
+  // fetchAll() opens by setting the four loading flags to true. On this mount
+  // that is a no-op: all four already initialise to true, and React bails out
   // of a re-render when the next state is Object.is-equal to the current one,
   // so there is no cascading render for the lint rule to protect against. The
   // calls are not removable either — the same fetchAll() is the manual Refresh
@@ -154,6 +161,12 @@ export default function App() {
           Client Health
         </button>
         <button
+          className={`tab-btn ${activeTab === 'escalations' ? 'active' : ''}`}
+          onClick={() => setActiveTab('escalations')}
+        >
+          Escalations{escalations.length > 0 ? ` (${escalations.length})` : ''}
+        </button>
+        <button
           className={`tab-btn ${activeTab === 'analytics' ? 'active' : ''}`}
           onClick={() => setActiveTab('analytics')}
         >
@@ -186,8 +199,18 @@ export default function App() {
           loading={healthLoading}
           onSelectClient={goToClientInvoices}
         />
+      ) : activeTab === 'escalations' ? (
+        <EscalationsTab
+          escalations={escalations}
+          loading={escalationsLoading}
+          onResolved={fetchAll}
+        />
       ) : (
-        <AnalyticsTab analytics={analytics} loading={analyticsLoading} />
+        <AnalyticsTab
+          analytics={analytics}
+          healthScores={healthScores}
+          loading={analyticsLoading}
+        />
       )}
     </div>
   )

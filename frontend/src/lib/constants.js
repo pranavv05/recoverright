@@ -40,6 +40,35 @@ export const RISK_TIER_CLASS = {
 // client-side so the column headers stay interactive.
 export const RISK_TIER_ORDER = { critical: 0, at_risk: 1, watch: 2, healthy: 3 }
 
+// Escalation priority, from execution/workers.py's PRIORITY_MAP. A security or
+// legal reason outranks a large but ordinary balance, which is why the queue
+// sorts on this before it sorts on money.
+export const PRIORITY_LABELS = {
+  URGENT: 'Urgent',
+  HIGH: 'High',
+  MEDIUM: 'Medium',
+  LOW: 'Low',
+}
+
+export const PRIORITY_CLASS = {
+  URGENT: 'badge-priority-urgent',
+  HIGH: 'badge-priority-high',
+  MEDIUM: 'badge-priority-medium',
+  LOW: 'badge-priority-low',
+}
+
+export const PRIORITY_ORDER = { URGENT: 0, HIGH: 1, MEDIUM: 2, LOW: 3 }
+
+// A reviewer's verdict, as recorded in the `escalation_resolved` audit event's
+// `decision` column. Kept separate from DECISION_CLASS because these are not
+// engine decisions — the audit trail renders both, and conflating them would
+// let a human verdict be mistaken for a policy one.
+export const RESOLUTION_CLASS = {
+  APPROVED: 'badge-resolution-approved',
+  REJECTED: 'badge-resolution-rejected',
+  DEFERRED: 'badge-resolution-deferred',
+}
+
 export const TREND_LABELS = {
   improving: 'Improving',
   stable: 'Stable',

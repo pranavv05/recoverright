@@ -8,6 +8,7 @@ import {
   analytics,
   apiResponses,
   blockedTrail,
+  escalations,
   healthScores,
   invoices,
   metrics,
@@ -17,6 +18,11 @@ import {
 // client filter and the audit-trail fetch meet. These are integration tests
 // over that wiring: axios is stubbed at the instance, everything below it is
 // the real component tree.
+
+// Every read endpoint the dashboard opens with. Derived from the fixture map
+// rather than repeated here, so adding a tab updates both the "fetched in one
+// pass" and the "fetched concurrently" assertions at once.
+const DASHBOARD_ENDPOINTS = Object.keys(apiResponses())
 
 function mockApi({ responses = apiResponses(), trails = {}, failures = {} } = {}) {
   const get = vi.spyOn(api, 'get').mockImplementation((url) => {
@@ -49,17 +55,10 @@ describe('App — initial load', () => {
     vi.restoreAllMocks()
   })
 
-  it('fetches all four dashboard endpoints in one pass', async () => {
+  it('fetches every dashboard endpoint in one pass', async () => {
     const { get } = await renderApp()
     const urls = get.mock.calls.map(([url]) => url)
-    expect(urls).toEqual(
-      expect.arrayContaining([
-        '/api/invoices',
-        '/api/metrics',
-        '/api/client-health',
-        '/api/analytics',
-      ])
-    )
+    expect(urls).toEqual(expect.arrayContaining(DASHBOARD_ENDPOINTS))
   })
 
   it('fetches them concurrently rather than one after another', async () => {
@@ -80,7 +79,7 @@ describe('App — initial load', () => {
 
     render(<App />)
     await screen.findByText('INV-1001')
-    expect(maxInFlight).toBe(4)
+    expect(maxInFlight).toBe(DASHBOARD_ENDPOINTS.length)
   })
 
   it('shows a loading state before the invoices arrive', () => {
@@ -360,6 +359,54 @@ describe('App — running a batch', () => {
 
     await userEvent.setup().click(screen.getByRole('button', { name: 'Run Batch' }))
     expect(await screen.findByText('INV-2001')).toBeInTheDocument()
+  })
+})
+
+describe('App — escalation queue', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('shows the open count on the tab so the queue is visible without opening it', async () => {
+    await renderApp()
+    expect(
+      screen.getByRole('button', { name: `Escalations (${escalations.length})` })
+    ).toBeInTheDocument()
+  })
+
+  it('drops the count from the tab when nothing is awaiting review', async () => {
+    await renderApp({ responses: apiResponses({ '/api/escalations': [] }) })
+    expect(screen.getByRole('button', { name: 'Escalations' })).toBeInTheDocument()
+  })
+
+  it('opens the queue and shows the cases', async () => {
+    await renderApp()
+    await userEvent.setup().click(
+      screen.getByRole('button', { name: /^Escalations/ })
+    )
+
+    expect(screen.getByText('INV-1077')).toBeInTheDocument()
+    expect(screen.getByText(/awaiting review/)).toBeInTheDocument()
+  })
+
+  it('refetches the whole dashboard after a verdict, not just the queue', async () => {
+    // A resolution can create an execution, which changes the invoice table
+    // and the metrics too — so the refresh has to be the full one.
+    const { get, post } = await renderApp()
+    post.mockResolvedValue({ data: { resolution: 'rejected' } })
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /^Escalations/ }))
+
+    const before = get.mock.calls.length
+    await user.type(screen.getByLabelText('Reviewer name or email'), 'cfo@example.com')
+    await user.click(screen.getAllByRole('button', { name: 'Reject' })[0])
+
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(get.mock.calls.length).toBeGreaterThanOrEqual(
+        before + DASHBOARD_ENDPOINTS.length
+      )
+    )
   })
 })
 

@@ -48,6 +48,15 @@ the over-escalation count, because an engine that escalated all 41 would also
 score zero. See § Evaluation Results for the full accounting, including what
 this system still gets wrong.
 
+**And one output is revenue for Razorpay, not for the merchant.** Diagnosing
+*why* an invoice is unpaid separates a client who won't pay from one who
+currently can't — and the second group is a working-capital book. Across this
+corpus the scorer flags **9 of 92 clients**, ₹23.85 lakh of receivables, as
+Razorpay Capital candidates: payment history that was reliable and has recently
+deteriorated, no disputes, no legal threats. Qualified leads produced as a
+by-product of collections, with no form for anyone to fill in.
+See § Razorpay Capital Lead Generation.
+
 ---
 
 ## The Problem
@@ -109,11 +118,19 @@ PaymentLink Escalation  Block      Wait      Information
  (Razorpay)  (human,    (records   (schedules (drafts, never
      │        priorit-   refusal,   re-check)  sends)
      │        ised)      contacts
-     │                   nobody)
+     │          │        nobody)
+     │          ↓
+     │  [HUMAN] REVIEW QUEUE  → approve / reject / defer. An approval may pick
+     │                          only from the engine's own allowed_actions, so
+     │                          it can never authorise a chase or a payment
+     │                          demand. Every verdict is audited, by name.
      │
-[CODE]  Reconcile                → poll Razorpay; recovery counts ONLY on
-        │                          confirmed amount_paid (the only writer of
-        │                          amount_recovered_paise)
+[CODE]  Reconcile                → triggered by a poll after link creation, or
+        │                          by a signed payment_link.paid webhook. Either
+        │                          way it re-reads Razorpay; recovery counts ONLY
+        │                          on confirmed amount_paid (the only writer of
+        │                          amount_recovered_paise). The webhook body's
+        │                          own amount is never used.
         │
 [CODE]  Audit trail              → every decision logged: wanted / allowed / did / result
         │
@@ -124,10 +141,11 @@ PaymentLink Escalation  Block      Wait      Information
 ```
 
 Reconciliation runs inline in `process_invoice`, immediately after every
-successful `create_payment_link` — it is not a demo-only step. In the demo,
-reconciliation polls the Razorpay test-mode API after link creation. In
-production, this would be triggered by Razorpay's `payment.captured` webhook
-instead of polling.
+successful `create_payment_link` — it is not a demo-only step. It has two
+triggers: the inline poll after link creation, and the signed webhook at
+`POST /api/webhooks/razorpay`. Both call the same `reconcile_payment`, which
+re-reads the Razorpay API; the webhook's own reported amount is never written.
+See § Razorpay Webhook.
 
 ### Key Design Decisions
 
@@ -348,6 +366,50 @@ An account with no overdue invoices returns `invoices_fetched: 0` with a `messag
 
 ---
 
+## Razorpay Webhook
+
+`POST /api/webhooks/razorpay` is the push half of reconciliation — the thing
+§ Limitations used to say production would need.
+
+**The webhook is a trigger, not a source of truth.** Its body carries an
+amount, and that amount is deliberately ignored. What the delivery does is say
+*when* to look; the looking is still `execution.actions.reconcile_payment`,
+which calls the Razorpay API, re-checks every identity and amount invariant,
+and remains the only place in this codebase that writes a non-zero
+`amount_recovered_paise`.
+
+That is the whole design, and the reason for it is that a webhook body is an
+unauthenticated POST from the open internet until its signature is checked —
+and even after the signature checks out, it is a claim about money made by a
+payload. Crediting an invoice from it would create a second writer of money
+whose input is attacker-shaped. So it creates no path to the money column at
+all: a forged or replayed delivery can at worst cause a redundant read of
+Razorpay's own API.
+
+- **Signature.** HMAC-SHA256 over the *exact raw request body*, keyed with
+  `RAZORPAY_WEBHOOK_SECRET`, compared with `hmac.compare_digest` — a
+  short-circuiting `==` leaks the position of the first wrong byte to anyone
+  who can time the response. The raw bytes matter: re-serialising the parsed
+  JSON produces a different digest for the same delivery, which is why the
+  handler reads `await request.body()` rather than a parsed model.
+- **An unset secret is a 503, not a skipped check.** An endpoint that accepts
+  unsigned deliveries for local convenience is an endpoint that accepts them in
+  production. A bad signature is a 401. Razorpay retries any non-2xx, so a real
+  delivery we could not authenticate comes back rather than vanishing.
+- **Idempotent.** Razorpay retries until it gets a 2xx and fires both
+  `payment_link.paid` and `payment.captured` for one settlement. An invoice
+  already marked `payment_verified` short-circuits, so the trail does not fill
+  with duplicate `payment_verified` events.
+- **Every branch is audited.** A delivery that decided to do nothing writes a
+  `webhook_received` event saying so, including the note that the figure was
+  re-read from the API rather than taken from the body.
+
+Setup: Razorpay Dashboard → Settings → Webhooks → add
+`https://<your-host>/api/webhooks/razorpay`, subscribe to `payment_link.paid`,
+and put the signing secret in `RAZORPAY_WEBHOOK_SECRET`.
+
+---
+
 ## CSV Upload
 
 Merchants can upload their overdue invoices as CSV directly from Tally, Zoho Books, or Excel. Download the sample CSV to see the expected format.
@@ -389,7 +451,7 @@ If required columns are missing, the upload is rejected with a message listing e
 ## Dashboard
 
 `uvicorn api.main:app --port 8000` plus `npm run dev` in `frontend/`. React +
-Vite, reading the same tables the batch writes. Three tabs:
+Vite, reading the same tables the batch writes. Four tabs:
 
 **Invoices** — one row per processed invoice: evidence tier, diagnosed cause
 with the evidence the model cited, the policy decision with the rule that
@@ -406,16 +468,135 @@ above it:
 
 **Client Health** — every client's risk tier, outstanding total, average days
 overdue, payment trend, and pattern description, sorted worst-first. Razorpay
-Capital candidates carry a `CANDIDATE` badge whose tooltip gives the reasoning.
-Clicking a client filters the Invoices tab to that client.
+Capital candidates carry a `CANDIDATE` badge here and get their own panel on
+the Analytics tab. Clicking a client filters the Invoices tab to that client.
+
+**Escalations** — the human review queue. Every REQUIRE_HUMAN decision lands
+here as a case file: why the engine escalated, what the agent proposed, the
+diagnosis and the evidence it cited, and the client's own note. A reviewer
+records **Approve**, **Reject**, or **Defer**, and every verdict is written to
+the audit trail with the reviewer's name — a refusal is recorded as
+deliberately as an approval, because an escalation that quietly leaves a queue
+is indistinguishable from one nobody read. See § Human Review Queue.
 
 **Analytics** — recovery rate by scenario, the most-fired policy rules, clients
-with more than one invoice, and average days overdue by diagnosed cause.
+with more than one invoice, average days overdue by diagnosed cause, and the
+Razorpay Capital candidate list with the qualified receivable total.
 
 Ingestion controls sit above the tabs: **Sync from Razorpay** pulls overdue
 invoices from the connected account, and **Upload Invoice CSV** accepts a
 Tally / Zoho Books / Excel export. Both run the same pipeline as a JSON batch
 and both are always simulated — neither creates a live payment link.
+
+## Human Review Queue
+
+The engine escalates roughly two thirds of a held-out batch to a person. Until
+recently that decision terminated in an `escalated_to_human` row nobody could
+act on — the agent handed off to a human who had nowhere to stand. `POST
+/api/escalations/{invoice_id}/resolve` and the Escalations tab are where that
+handoff now lands.
+
+**What a reviewer may authorise is not "anything".** The policy engine already
+publishes, per decision, the exact set of actions permissible for that invoice
+(`PolicyDecision.allowed_actions`). Approving dispatches one action *from that
+set*, through the same `Orchestrator` every batch uses. The approval satisfies
+the engine's requirement that a person look at the invoice; it cannot widen
+what the engine permitted. That is tightening-only in exactly the way the two
+model-reading policy rules are.
+
+It has a consequence worth stating plainly:
+
+> **No REQUIRE_HUMAN decision this engine can produce lists `send_reminder` or
+> `create_payment_link`.** The review queue therefore cannot be used to chase a
+> client or raise a payment demand — not by a reviewer who wants to, and not by
+> a bug.
+
+That is a property of the engine, not of the queue, which is why the queue can
+be trusted with it.
+`test_no_escalation_in_the_corpus_permits_a_customer_facing_action` sweeps all
+93 invoices and fails if a future rule ever adds one.
+
+A dispute's decision permits `escalate_to_human` and `create_dispute_record` —
+both handoffs to a person, which is what the review already is. Approving one
+would write a fresh escalation event and put the invoice straight back in the
+queue, so the queue filters them out by asking the real routing table rather
+than keeping a second copy of it. On a disputed invoice the card therefore
+offers **no Approve control at all**, and says so: the reviewer handles it
+directly and records a verdict.
+
+| Verdict | What happens |
+|---|---|
+| **Approve** + one permitted action | Dispatched through the orchestrator, same worker, same audit vocabulary |
+| **Reject** | Recorded with the reviewer's name and note. Contacts nobody, runs no worker |
+| **Defer** | Same, for a case that needs to come back later |
+
+Three refusals are distinguished on purpose: `404` means there is nothing to
+resolve, `409` means the invoice was re-processed and the reviewer is looking
+at a case file that changed underneath them, and `422` means the action asked
+for is not one the engine permits on this invoice — a refusal, not a typo. An
+approval with no `actor` is refused outright: an unattributed approval is not
+an audit trail. A BLOCK never enters the queue at all.
+
+`actor` arrives in the request body only because this demo has no auth layer.
+In production it comes from the session, and accepting it from a client would
+be a way to forge an approval — see § Limitations.
+
+---
+
+## Razorpay Capital Lead Generation
+
+Every other output of this system helps the merchant collect money. This one
+is revenue for Razorpay.
+
+Diagnosing *why* an invoice is unpaid separates a client who **won't** pay from
+one who currently **can't**. The second group is a working-capital book, and
+the system is already holding the evidence that identifies it — payment
+history, dispute signals, legal signals, and a trend — as a by-product of
+deciding whether to chase.
+
+`evaluation/health_scorer.py` flags a client when **all five** hold:
+
+1. the dominant diagnosed cause across their invoices is `cash_flow_delay`
+2. zero disputes on file
+3. zero legal threats on file
+4. the payment trend is `deteriorating` (last 3 payments worse than the 3 before)
+5. they were **formerly reliable** — the older half of the history is mostly on-time
+
+Points 2 and 3 are what make it a *lead* rather than a list of late payers: a
+client in dispute or threatening legal action is not a credit prospect whatever
+their trend looks like, and handing one to Razorpay Capital as qualified would
+be worse than handing over none. Point 5 is what separates a business with a
+temporary squeeze from one that has always paid badly.
+
+Across the full 93-invoice corpus this selects **9 of 92 clients**, totalling
+**₹23.85 lakh** of receivables:
+
+| | |
+|---|---|
+| Clients flagged | 9 of 92 (9.8%) |
+| Qualified receivable identified | ₹23,85,345 |
+| Credit decisions made by this system | **0** |
+
+`tests/test_readme_claims.py::test_readme_capital_lead_figures_match_the_corpus`
+recomputes both counts from `data/all_invoices.json`, so these numbers cannot
+drift from the dataset.
+
+**What this does not do.** It makes no credit decision, computes no limit, and
+scores no risk. Every flag carries
+`"Credit decision not made. Flagged for Razorpay Capital review."` in
+`capital_flag_reason`, and that string is on the dashboard next to the client.
+The output is a qualified lead with its reasoning attached, for an underwriter
+to accept or discard.
+
+**Honest limit of the signal on this corpus.** All 9 flagged clients are also
+all 9 clients whose dominant cause is `cash_flow_delay` — on this dataset the
+trend and formerly-reliable filters exclude nobody that the cause filter
+admitted. That is a property of a 93-invoice synthetic corpus, not evidence
+that the extra conditions are redundant; on a real book with genuine chronic
+late-payers they are what stops the list filling up with them. Measured, not
+assumed: the filters are there for a population this dataset does not contain.
+
+---
 
 ## Dataset
 
@@ -707,7 +888,7 @@ This is a buildathon submission, not a production system. Honest gaps:
 
 - **Simulated customer responses.** Client replies, email opens, and promise-to-pay tracking are synthetic — the system does not actually send emails or track real engagement.
 - **Test-mode payments only.** All Razorpay interactions use test-mode APIs. No real money moves.
-- **No real-time webhook reconciliation.** Payment verification is simulated by polling the test-mode API rather than receiving live webhooks.
+- **The webhook exists but has not received a live delivery.** `POST /api/webhooks/razorpay` verifies Razorpay's HMAC-SHA256 signature and triggers the same `reconcile_payment` the polling path uses (see § Razorpay Webhook). It is exercised by 22 tests against constructed deliveries; it has not been pointed at a real Razorpay account over a public URL, so the end-to-end path is verified in test rather than in the field.
 - **NVIDIA NIM rate limits.** The free NVIDIA NIM tier has request-per-minute limits that a 52-invoice batch (≈104 calls) will hit. `diagnosis/diagnoser.py` handles them with four mechanisms rather than one, because the obvious one is not sufficient on its own:
   - **Full-jitter backoff.** A bare `2 ** attempt` is what actually broke the batch: tasks rate-limited at the same instant sleep the same interval and collide again on every retry, so all six attempts burn inside a few seconds. Delays are now drawn from `[0, cap]`.
   - **A shared cooldown.** A 429 is information about the shared endpoint, not about one invoice, so it pauses *every* task's next request instead of only the one that received it.
@@ -737,7 +918,7 @@ This is a buildathon submission, not a production system. Honest gaps:
   but recall on genuinely novel phrasing is unknown and unmeasured — there is
   no labelled adversarial corpus here to measure it against. A production
   system would layer in a classifier and measure it.
-- **No authentication.** The API and dashboard have no auth layer, and the
+- **No authentication, and the review queue inherits it.** The API and dashboard have no auth layer, so the escalation queue takes the reviewer's identity (`actor`) from the request body. It is recorded verbatim, which makes the trail honest about *what was claimed*, but in production `actor` must come from the session — accepting it from a client is a way to forge an approval. The
   dashboard's `Run Batch` button is an unauthenticated POST that spends LLM
   quota. Appropriate for a demo, not for production.
 - **No atomic pipeline transaction.** Each database write is individually
@@ -775,6 +956,12 @@ recoverright/
     razorpay_import.py       # Razorpay Invoices API → invoice dicts
     queries.py               # The read layer: invoice rows, metrics, client
                              # health. No writes, no decisions
+    escalations.py           # The human review queue. A reviewer chooses among
+                             # the engine's own allowed_actions and cannot
+                             # widen them — see § Human Review Queue
+    webhooks.py              # Razorpay webhook receipt. Verifies the HMAC and
+                             # triggers reconcile_payment; never credits from
+                             # the payload — see § Razorpay Webhook
     routes.py                # The FastAPI surface — HTTP concerns only. Every
                              # handler validates, calls one function, maps errors
   policy/
@@ -818,6 +1005,9 @@ recoverright/
     test_csv_upload.py           test_razorpay_sync.py
     test_financial.py            test_health_scoring.py
     test_data_integrity.py       test_readme_claims.py
+    test_escalation_queue.py     # what a reviewer can and cannot authorise
+    test_webhooks.py             # signature checks, and that the payload's
+                                 # amount reaches nothing
     test_reconciliation.py       # the five guards on the only writer of money
     test_metrics.py              # the scorecard's own arithmetic
     test_execution_retry.py      # what is retried, what is surfaced immediately
@@ -831,7 +1021,8 @@ recoverright/
                              # constants.js (backend tokens → labels/classes)
     src/components/          # InvoiceTable, InvoiceCells, DetailPanel,
                              # WhyNot, ReasoningChain, ClientHealthTab,
-                             # AnalyticsTab, CsvUpload, RazorpaySync, Counter
+                             # EscalationsTab, AnalyticsTab, CsvUpload,
+                             # RazorpaySync, Counter
     src/**/*.test.{js,jsx}   # 191 Vitest + React Testing Library tests,
                              # ~99% statement coverage (thresholds enforced
                              # in vite.config.js). See frontend/README.md

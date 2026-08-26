@@ -1,7 +1,15 @@
 import ReasoningChain from './ReasoningChain'
 import WhyNot from './WhyNot'
-import { DECISION_CLASS } from '../lib/constants'
+import { DECISION_CLASS, RESOLUTION_CLASS } from '../lib/constants'
 import { formatTime, rupees } from '../lib/format'
+
+// An audit event's `decision` column carries an engine verdict on a
+// policy_decision row and a human verdict on an escalation_resolved row. Both
+// render here; keeping the two maps separate is what stops a reviewer's
+// APPROVED from being styled as though the policy engine had allowed it.
+function decisionClass(decision) {
+  return DECISION_CLASS[decision] || RESOLUTION_CLASS[decision] || 'badge-none'
+}
 
 export default function DetailPanel({ invoiceId, invoice, trail, loading, onClose }) {
   if (!invoiceId) {
@@ -40,7 +48,7 @@ export default function DetailPanel({ invoiceId, invoice, trail, loading, onClos
                 <div className="audit-event-head">
                   <span className="audit-event-type">{event.event_type}</span>
                   {event.decision && (
-                    <span className={`badge ${DECISION_CLASS[event.decision] || 'badge-none'}`}>
+                    <span className={`badge ${decisionClass(event.decision)}`}>
                       {event.decision}
                     </span>
                   )}

@@ -1,7 +1,70 @@
 import Counter from './Counter'
-import { humanize, lakhs, recoveryTone } from '../lib/format'
+import { humanize, lakhs, recoveryTone, rupees } from '../lib/format'
 
-export default function AnalyticsTab({ analytics, loading }) {
+// The one output of this system that is revenue for Razorpay rather than for
+// the merchant. `evaluation/health_scorer.py` flags a client whose payment
+// history was reliable and has recently deteriorated, with no disputes and no
+// legal threats on file — cash-flow constrained rather than unwilling to pay.
+// That is a qualified working-capital lead, produced as a by-product of
+// collections rather than by asking anyone to fill in a form.
+//
+// It renders as a panel rather than a tooltip on a table cell because a lead
+// nobody can see is not a lead. The scorer makes no credit decision and this
+// panel does not imply one — see `capital_flag_reason`.
+function CapitalCandidates({ healthScores }) {
+  const candidates = healthScores
+    .filter((row) => row.capital_flag)
+    .sort((a, b) => (b.total_outstanding_paise || 0) - (a.total_outstanding_paise || 0))
+
+  const total = candidates.reduce((sum, row) => sum + (row.total_outstanding_paise || 0), 0)
+
+  return (
+    <div className="analytics-panel analytics-panel-capital">
+      <div className="analytics-panel-title">
+        Razorpay Capital — Working-Capital Candidates
+      </div>
+      <div className="analytics-panel-body">
+        {candidates.length === 0 ? (
+          <div className="health-empty">
+            No clients in this batch match the working-capital profile.
+          </div>
+        ) : (
+          <>
+            <div className="capital-summary">
+              <strong>{candidates.length}</strong> client
+              {candidates.length === 1 ? '' : 's'} ·{' '}
+              <strong>{rupees(total)}</strong> in qualified receivables
+            </div>
+            <table className="batch-table">
+              <thead>
+                <tr>
+                  <th>Client</th>
+                  <th>Outstanding (₹)</th>
+                  <th>Invoices</th>
+                  <th>Why it qualifies</th>
+                </tr>
+              </thead>
+              <tbody>
+                {candidates.map((row) => (
+                  <tr key={row.client_name}>
+                    <td><span className="cell-main">{row.client_name}</span></td>
+                    <td>{rupees(row.total_outstanding_paise)}</td>
+                    <td>{row.invoice_count}</td>
+                    <td>
+                      <div className="cell-sub">{row.capital_flag_reason}</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default function AnalyticsTab({ analytics, healthScores = [], loading }) {
   if (loading) {
     return <div className="loading">Loading analytics…</div>
   }
@@ -159,6 +222,10 @@ export default function AnalyticsTab({ analytics, loading }) {
             )}
           </div>
         </div>
+      </div>
+
+      <div className="analytics-row analytics-row-single">
+        <CapitalCandidates healthScores={healthScores} />
       </div>
     </div>
   )

@@ -1,7 +1,7 @@
 import { render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import AnalyticsTab from './AnalyticsTab'
-import { analytics, emptyAnalytics } from '../test/fixtures'
+import { analytics, emptyAnalytics, healthScores } from '../test/fixtures'
 
 describe('AnalyticsTab', () => {
   it('shows a loading message rather than empty panels', () => {
@@ -128,5 +128,78 @@ describe('AnalyticsTab', () => {
     expect(screen.getByText('No policy decisions yet.')).toBeInTheDocument()
     expect(screen.getByText('No clients with 2+ invoices in this batch.')).toBeInTheDocument()
     expect(screen.getByText('No diagnosis data yet.')).toBeInTheDocument()
+  })
+
+  describe('Razorpay Capital candidates', () => {
+    // The one output of this system that is revenue for Razorpay rather than
+    // for the merchant. It used to be a tooltip on a table cell in another
+    // tab; these tests are what keep it a first-class panel.
+
+    it('lists the clients the health scorer flagged', () => {
+      render(<AnalyticsTab analytics={analytics} healthScores={healthScores} loading={false} />)
+      const panel = screen.getByText(/Razorpay Capital/).closest('.analytics-panel')
+
+      expect(within(panel).getByText('Konkan Marine Logistics')).toBeInTheDocument()
+      // The other two fixture clients are not flagged and must not appear here.
+      expect(within(panel).queryByText('Nilgiri Textiles')).toBeNull()
+      expect(within(panel).queryByText('Sahyadri Precision Auto')).toBeNull()
+    })
+
+    it('totals the qualified receivable', () => {
+      const { container } = render(
+        <AnalyticsTab analytics={analytics} healthScores={healthScores} loading={false} />
+      )
+      // The count and the total are split across <strong> elements, so the
+      // assertion reads the summary line's text rather than a single node.
+      const summary = container.querySelector('.capital-summary')
+      expect(summary.textContent).toContain('1 client ·')
+      expect(summary.textContent).toContain('₹5,20,00,000')
+      expect(summary.textContent).toContain('qualified receivables')
+    })
+
+    it('pluralises the client count', () => {
+      const two = healthScores.map((row) => ({ ...row, capital_flag: true })).slice(0, 2)
+      const { container } = render(
+        <AnalyticsTab analytics={analytics} healthScores={two} loading={false} />
+      )
+      expect(container.querySelector('.capital-summary').textContent).toContain('2 clients ·')
+    })
+
+    it('shows why each client qualifies, rather than only that it does', () => {
+      render(<AnalyticsTab analytics={analytics} healthScores={healthScores} loading={false} />)
+      expect(
+        screen.getByText('Large stable receivable — working-capital candidate')
+      ).toBeInTheDocument()
+    })
+
+    it('shows an empty state rather than vanishing when nothing qualifies', () => {
+      const unflagged = healthScores.map((row) => ({ ...row, capital_flag: false }))
+      render(<AnalyticsTab analytics={analytics} healthScores={unflagged} loading={false} />)
+
+      expect(screen.getByText(/Razorpay Capital/)).toBeInTheDocument()
+      expect(
+        screen.getByText(/No clients in this batch match the working-capital profile/)
+      ).toBeInTheDocument()
+    })
+
+    it('renders without health scores at all', () => {
+      // Analytics loads independently of client health; a missing prop must
+      // not take the whole tab down.
+      render(<AnalyticsTab analytics={analytics} loading={false} />)
+      expect(screen.getByText(/Razorpay Capital/)).toBeInTheDocument()
+    })
+
+    it('orders candidates by the size of the receivable', () => {
+      const two = [
+        { ...healthScores[1], client_name: 'Small Co', total_outstanding_paise: 100000 },
+        { ...healthScores[1], client_name: 'Large Co', total_outstanding_paise: 900000 },
+      ]
+      const { container } = render(
+        <AnalyticsTab analytics={analytics} healthScores={two} loading={false} />
+      )
+      const panel = container.querySelector('.analytics-panel-capital')
+      const names = [...panel.querySelectorAll('.cell-main')].map((n) => n.textContent)
+      expect(names).toEqual(['Large Co', 'Small Co'])
+    })
   })
 })

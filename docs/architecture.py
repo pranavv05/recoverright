@@ -39,6 +39,8 @@ HUMAN_FILL, HUMAN_EDGE = "#5a3a0a", "#f59e0b"
 OUT_FILL, OUT_EDGE = "#14263d", "#38bdf8"
 HEALTH_FILL, HEALTH_EDGE = "#312e81", "#818cf8"
 RECOVERY_FILL, RECOVERY_EDGE = "#3f1d38", "#c084fc"
+REVIEW_FILL, REVIEW_EDGE = "#3d2f0a", "#fbbf24"
+CAPITAL_FILL, CAPITAL_EDGE = "#3d3016", "#ffd65c"
 
 
 def box(ax, x, y, w, h, title, sub=None, fill=CODE_FILL, edge=CODE_EDGE,
@@ -91,12 +93,15 @@ def arrow(ax, start, end, color=TEXT, rad=0.0, lw=2.0, style="-|>", dashed=False
     ))
 
 
-def new_canvas(width, height):
+def new_canvas(width, height, bottom=0.0):
+    """A 0..1 drawing area. `bottom` extends it downward for a trailing row —
+    boxes placed below y=0 are otherwise silently clipped, which is how the
+    capital-lead panel first rendered as floating text with no box around it."""
     fig, ax = plt.subplots(figsize=(width, height))
     fig.patch.set_facecolor(BG)
     ax.set_facecolor(BG)
     ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
+    ax.set_ylim(bottom, 1)
     ax.axis("off")
     return fig, ax
 
@@ -106,7 +111,7 @@ def new_canvas(width, height):
 # ─────────────────────────────────────────────────────────────────────────
 
 def draw_full(path):
-    fig, ax = new_canvas(19.8, 13.4)
+    fig, ax = new_canvas(19.8, 15.2, bottom=-0.20)
 
     ax.text(0.5, 0.972, "RecoverRight — Architecture", ha="center",
             color=TEXT, fontsize=27, fontweight="bold")
@@ -175,12 +180,12 @@ def draw_full(path):
             fontsize=12.5, fontweight="bold")
     ax.text(0.391, 0.441, "BLOCK", ha="center", color="#ef4444",
             fontsize=12.5, fontweight="bold")
-    ax.text(0.706, 0.452, "REQUIRE_HUMAN", ha="center", color="#f59e0b",
+    ax.text(0.686, 0.452, "REQUIRE_HUMAN", ha="center", color="#f59e0b",
             fontsize=12.5, fontweight="bold")
 
     arrow(ax, (0.281, 0.510), (0.150, 0.420), color="#22c55e", rad=0.25, lw=2.4)
     arrow(ax, (0.391, 0.474), (0.391, 0.420), color="#ef4444", lw=2.4)
-    arrow(ax, (0.507, 0.510), (0.652, 0.420), color="#f59e0b", rad=-0.25, lw=2.4)
+    arrow(ax, (0.507, 0.510), (0.623, 0.420), color="#f59e0b", rad=-0.25, lw=2.4)
 
     # ── Execution layer ──────────────────────────────────────────────────
     box(ax, 0.064, 0.358, 0.172, 0.062, "Orchestrator",
@@ -202,11 +207,21 @@ def draw_full(path):
         fill=BLOCK_FILL, edge=BLOCK_EDGE, title_size=13, sub_color="#fca5a5")
     arrow(ax, (0.392, 0.358), (0.392, 0.222), color="#ef4444", lw=2.0)
 
-    box(ax, 0.562, 0.358, 0.230, 0.062, "Escalation Worker",
+    box(ax, 0.520, 0.358, 0.206, 0.062, "Escalation Worker",
         "priority: URGENT / HIGH / MEDIUM / LOW",
-        fill=HUMAN_FILL, edge=HUMAN_EDGE, title_size=13, sub_color="#fcd34d",
-        sub_size=8.4)
-    arrow(ax, (0.610, 0.358), (0.492, 0.210), color="#f59e0b", rad=0.22, lw=2.0)
+        fill=HUMAN_FILL, edge=HUMAN_EDGE, title_size=12.5, sub_color="#fcd34d",
+        sub_size=8.0)
+
+    # The queue the escalation lands in. Its whole safety argument is the line
+    # inside it: a reviewer picks from the engine's own allowed_actions.
+    stack(ax, 0.520, 0.232, 0.206, 0.086, [
+        ("HUMAN REVIEW QUEUE", 11, "#fde68a", True),
+        ("approve · reject · defer", 8.6, "#fcd34d", False),
+        ("approval picks only from the", 8.0, "#fcd34d", False),
+        ("engine's own allowed_actions", 8.0, "#fcd34d", False),
+    ], fill=REVIEW_FILL, edge=REVIEW_EDGE)
+    arrow(ax, (0.623, 0.358), (0.623, 0.318), color="#f59e0b", lw=2.0)
+    arrow(ax, (0.520, 0.258), (0.500, 0.196), color="#f59e0b", rad=0.20, lw=1.8)
 
     # ── Failure recovery — the layer the old diagram left out entirely ───
     stack(ax, 0.812, 0.556, 0.176, 0.152, [
@@ -235,23 +250,39 @@ def draw_full(path):
         "the only writer of amount_recovered_paise",
         fill=CODE_FILL, edge=CODE_EDGE, title_size=14, sub_size=8.2)
 
+    # Two triggers, one writer. The webhook says *when* to look; the looking
+    # is the same API re-read, so the delivery's own amount is never used.
+    stack(ax, 0.030, 0.148, 0.212, 0.078, [
+        ("Razorpay Webhook", 12, TEXT, True),
+        ("HMAC-SHA256 verified", 8.2, MUTED, False),
+        ("triggers the re-read, never credits", 8.0, MUTED, False),
+    ], fill="#2b3038", edge="#c3c8ce")
+    arrow(ax, (0.242, 0.172), (0.286, 0.082), color="#c3c8ce", rad=-0.25, lw=1.6)
+
     # Health scoring runs after the batch, never during it.
-    stack(ax, 0.030, 0.028, 0.212, 0.094, [
-        ("Client Health Scoring", 12.5, TEXT, True),
-        ("risk tiers: Healthy | Watch | At-Risk | Critical", 8.2, "#c7d2fe", False),
-        ("Razorpay Capital lead flag", 8.2, "#c7d2fe", False),
+    stack(ax, 0.030, 0.028, 0.212, 0.082, [
+        ("Client Health Scoring", 12, TEXT, True),
+        ("runs after the batch, never during it", 8.0, "#c7d2fe", False),
+        ("Healthy | Watch | At-Risk | Critical", 8.2, "#c7d2fe", False),
     ], fill=HEALTH_FILL, edge=HEALTH_EDGE)
-    arrow(ax, (0.286, 0.148), (0.242, 0.108), color="#818cf8", rad=0.25,
+    arrow(ax, (0.286, 0.140), (0.180, 0.112), color="#818cf8", rad=0.22,
           lw=1.5, dashed=True)
-    ax.text(0.136, 0.150, "runs after the batch completes, never during it",
-            ha="center", color="#a5b4fc", fontsize=8.2, style="italic")
+
+    # The one output that is revenue for Razorpay rather than for the merchant.
+    stack(ax, 0.030, -0.108, 0.290, 0.100, [
+        ("RAZORPAY CAPITAL LEAD", 11, "#ffe9a8", True),
+        ("cash-flow constrained, not unwilling to pay", 8.2, "#ffd65c", False),
+        ("no disputes · no legal threats · was formerly reliable", 8.2, "#ffd65c", False),
+        ("a qualified lead — this system makes no credit decision", 8.2, "#ffd65c", False),
+    ], fill=CAPITAL_FILL, edge=CAPITAL_EDGE)
+    arrow(ax, (0.136, 0.028), (0.160, -0.006), color="#ffd65c", lw=1.8)
 
     # ── Output layer ─────────────────────────────────────────────────────
     ax.text(0.846, 0.318, "OUTPUT LAYER", ha="center", color=MUTED,
             fontsize=10.5, fontweight="bold")
     box(ax, 0.746, 0.192, 0.200, 0.078, "Dashboard",
-        "Invoices | Client Health | Analytics",
-        fill=OUT_FILL, edge=OUT_EDGE, title_size=14, sub_size=8.4,
+        "Invoices | Health | Escalations | Analytics",
+        fill=OUT_FILL, edge=OUT_EDGE, title_size=14, sub_size=8.0,
         sub_color="#bae6fd")
     box(ax, 0.746, 0.048, 0.200, 0.078, "Metrics",
         "0 inappropriate actions · 100% block rate",
@@ -265,11 +296,12 @@ def draw_full(path):
         ("Blue = LLM", LLM_EDGE),
         ("Gray = Deterministic Code", CODE_EDGE),
         ("Orange = Policy Engine", POLICY_EDGE),
+        ("Amber = Human Review", REVIEW_EDGE),
         ("Purple = Failure Recovery", RECOVERY_EDGE),
     ]
     for i, (label, color) in enumerate(legend):
-        ax.text(0.175 + i * 0.190, -0.014, label, ha="center", color=color,
-                fontsize=11, fontweight="bold")
+        ax.text(0.115 + i * 0.192, -0.170, label, ha="center", color=color,
+                fontsize=10.5, fontweight="bold")
 
     fig.savefig(path, facecolor=BG, dpi=120, bbox_inches="tight", pad_inches=0.25)
     plt.close(fig)
@@ -316,7 +348,7 @@ def draw_simple(path):
     box(ax, 0.516, 0.243, 0.188, 0.108, "BLOCK", "no action taken",
         fill=BLOCK_FILL, edge=BLOCK_EDGE, title_size=11, sub_size=7.2,
         sub_color="#fca5a5")
-    box(ax, 0.766, 0.243, 0.216, 0.108, "REQUIRE_HUMAN", "escalation",
+    box(ax, 0.766, 0.243, 0.216, 0.108, "REQUIRE_HUMAN", "human review queue",
         fill=HUMAN_FILL, edge=HUMAN_EDGE, title_size=10.5, sub_size=7.8,
         sub_color="#fcd34d")
 

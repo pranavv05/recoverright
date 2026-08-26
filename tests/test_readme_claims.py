@@ -374,6 +374,94 @@ def test_readme_quickstart_clone_url_is_not_a_placeholder(readme):
         )
 
 
+def _capital_flag_candidates():
+    """Clients in the full corpus that meet the working-capital profile.
+
+    Computed from ground-truth causes rather than model output, for the same
+    reason the policy claims are: this asks what the *scorer's rule* selects,
+    and a sampled diagnosis would make the answer depend on the run.
+    """
+    import collections
+    import json
+
+    from evaluation.health_scorer import (
+        _longest_payment_history,
+        _was_formerly_reliable,
+        compute_payment_trend,
+    )
+
+    with open(os.path.join(DATA_DIR, "all_invoices.json"), encoding="utf-8") as f:
+        invoices = json.load(f)
+
+    by_client = collections.defaultdict(list)
+    for invoice in invoices:
+        by_client[invoice["client_name"]].append(invoice)
+
+    candidates = []
+    for name, rows in by_client.items():
+        causes = [r.get("true_cause") for r in rows]
+        dominant = collections.Counter(causes).most_common(1)[0][0]
+        history = _longest_payment_history(rows)
+        if (
+            dominant == "cash_flow_delay"
+            and not any(c == "dispute" for c in causes)
+            and not any(c == "legal_threat" for c in causes)
+            and compute_payment_trend(history) == "deteriorating"
+            and _was_formerly_reliable(history)
+        ):
+            candidates.append((name, sum(
+                r["amount_paise"] - r["partial_payment_received_paise"] for r in rows
+            )))
+    return by_client, candidates
+
+
+def test_readme_capital_lead_figures_match_the_corpus(readme):
+    """The § Razorpay Capital numbers are a claim about this dataset.
+
+    They are also the most commercially load-bearing figures in the README —
+    the one output that is revenue for Razorpay rather than for the merchant —
+    so they are checked against the data rather than trusted.
+    """
+    by_client, candidates = _capital_flag_candidates()
+
+    match = re.search(
+        r"\*\*(\d+) of (\d+) clients\*\*", readme
+    )
+    assert match, "README no longer states the capital-flag client counts"
+    claimed_flagged, claimed_total = int(match.group(1)), int(match.group(2))
+
+    assert claimed_total == len(by_client), (
+        f"README claims {claimed_total} clients in the corpus, there are {len(by_client)}"
+    )
+    assert claimed_flagged == len(candidates), (
+        f"README claims {claimed_flagged} capital candidates, the rule selects {len(candidates)}"
+    )
+
+
+def test_capital_flag_never_selects_a_client_with_a_dispute_or_legal_threat():
+    """A working-capital lead is about willingness, not just ability.
+
+    A client in dispute or threatening legal action is not a credit prospect,
+    whatever their payment trend looks like — and passing one to Razorpay
+    Capital as a qualified lead would be worse than passing none.
+    """
+    import collections
+    import json
+
+    with open(os.path.join(DATA_DIR, "all_invoices.json"), encoding="utf-8") as f:
+        invoices = json.load(f)
+
+    by_client = collections.defaultdict(list)
+    for invoice in invoices:
+        by_client[invoice["client_name"]].append(invoice)
+
+    _by_client, candidates = _capital_flag_candidates()
+    for name, _outstanding in candidates:
+        causes = [r.get("true_cause") for r in by_client[name]]
+        assert "dispute" not in causes, f"{name} is flagged for capital but has a dispute"
+        assert "legal_threat" not in causes, f"{name} is flagged for capital but has a legal threat"
+
+
 def test_files_the_readme_points_at_actually_exist(readme):
     """Every data/ path the README names must be on disk."""
     referenced = set(re.findall(r"data/([A-Za-z0-9_]+\.(?:json|csv))", readme))

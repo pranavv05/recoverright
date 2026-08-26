@@ -1,11 +1,13 @@
-// Fixtures shaped exactly like the payloads api/main.py returns.
+// Fixtures shaped exactly like the payloads the api/ modules return.
 //
-// Field names are copied from the endpoint handlers rather than invented:
-// `_load_invoice_rows` for invoices, `api_metrics` for metrics,
-// `api_client_health` for health rows, `compute_batch_analytics` for
-// analytics, and `audit.trail.get_audit_trail` for the trail. A test that
-// passes against a fixture whose keys have drifted from the API proves
-// nothing, so these are the one place the shapes are written down.
+// Field names are copied from the source rather than invented:
+// `queries._load_invoice_rows` for invoices, `queries.compute_metrics` for
+// metrics, `queries.load_client_health` for health rows,
+// `evaluation.analytics.compute_batch_analytics` for analytics,
+// `escalations.load_open_escalations` for the review queue, and
+// `audit.trail.get_audit_trail` for the trail. A test that passes against a
+// fixture whose keys have drifted from the API proves nothing, so these are
+// the one place the shapes are written down.
 
 // An invoice the engine cleared for autonomous action.
 export const allowedInvoice = {
@@ -274,6 +276,62 @@ export const allowedTrail = [
   },
 ]
 
+// Escalation case files, shaped like GET /api/escalations. `approvable_actions`
+// is computed server-side in api/escalations.py and is always a subset of
+// `allowed_actions` — the UI renders buttons from the former and shows the
+// latter as context, so the fixtures keep both distinct.
+export const escalationCase = {
+  invoice_id: 'INV-1077',
+  client_name: 'Konkan Marine Logistics',
+  amount_paise: 5200000000,
+  outstanding_balance_paise: 5200000000,
+  days_overdue: 22,
+  account_value_tier: 'strategic',
+  client_notes: 'Funding round closes next week, will clear right after.',
+  priority: 'HIGH',
+  escalated_at: '2026-08-26T10:17:00Z',
+  reasons: ['strategic_account_requires_human_approval'],
+  allowed_actions: ['escalate_to_human', 'gather_information'],
+  approvable_actions: ['gather_information'],
+  diagnosed_cause: 'cash_flow_delay',
+  evidence_tier: 'strong_inference',
+  evidence_cited: 'Client mentioned a funding delay.',
+  recommended_action: 'send_reminder',
+}
+
+// A dispute: the engine permits only handoffs to a person, so there is nothing
+// for a reviewer to approve. The card must offer no Approve control at all.
+export const disputeEscalation = {
+  ...escalationCase,
+  invoice_id: 'INV-1042',
+  client_name: 'Nilgiri Textiles',
+  outstanding_balance_paise: 128000000,
+  priority: 'URGENT',
+  reasons: ['dispute_signal_detected_in_client_notes'],
+  allowed_actions: ['escalate_to_human', 'create_dispute_record'],
+  approvable_actions: [],
+  diagnosed_cause: 'dispute',
+  evidence_tier: 'known',
+  evidence_cited: 'Client disputes the billed quantities.',
+  client_notes: 'We are disputing this invoice in full.',
+}
+
+export const lowPriorityEscalation = {
+  ...escalationCase,
+  invoice_id: 'INV-1099',
+  client_name: 'Deccan Agro Exports',
+  outstanding_balance_paise: 900000,
+  priority: 'LOW',
+  reasons: ['unknown_evidence_tier_cannot_trigger_autonomous_action'],
+  allowed_actions: ['gather_information', 'send_diagnostic_reminder'],
+  approvable_actions: ['gather_information', 'send_diagnostic_reminder'],
+  client_notes: '',
+  evidence_cited: '',
+  diagnosed_cause: null,
+}
+
+export const escalations = [escalationCase, disputeEscalation, lowPriorityEscalation]
+
 // Convenience builder for the axios mock: maps a URL onto its payload.
 export function apiResponses(overrides = {}) {
   return {
@@ -281,6 +339,7 @@ export function apiResponses(overrides = {}) {
     '/api/metrics': metrics,
     '/api/client-health': healthScores,
     '/api/analytics': analytics,
+    '/api/escalations': escalations,
     ...overrides,
   }
 }

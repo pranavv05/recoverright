@@ -1,10 +1,11 @@
 """The FastAPI surface — HTTP concerns only.
 
 Every handler here does three things at most: validate what arrived, call one
-function in `api.pipeline`, `api.queries`, `api.csv_import` or
-`api.razorpay_import`, and turn a domain error into an HTTP status. There is
-no invoice logic in this module, and no SQL — that is the point of it being
-separate from the four modules it calls.
+function in `api.pipeline`, `api.queries`, `api.csv_import`,
+`api.razorpay_import`, `api.escalations` or `api.webhooks`, and turn a domain
+error into an HTTP status. There is no invoice logic in this module, and
+almost no SQL — that is the point of it being separate from the six modules
+it calls.
 
 Run with: uvicorn api.main:app --reload --port 8000
 """
@@ -12,12 +13,25 @@ Run with: uvicorn api.main:app --reload --port 8000
 import asyncio
 import logging
 import os
+from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from api.csv_import import SAMPLE_CSV_PATH, parse_csv_upload
+from api.escalations import (
+    ActionNotPermitted,
+    EscalationError,
+    EscalationNotFound,
+    EscalationStale,
+    escalation_summary,
+    get_escalation,
+    load_open_escalations,
+    load_resolution_history,
+    resolve_escalation,
+)
 from api.pipeline import (
     _dispatch_batch_async,
     build_rzp_client,
@@ -29,6 +43,11 @@ from api.queries import (
     load_client_health,
 )
 from api.razorpay_import import _razorpay_invoice_to_internal
+from api.webhooks import (
+    InvalidSignature,
+    WebhookNotConfigured,
+    handle_razorpay_webhook,
+)
 from audit.trail import get_audit_trail
 from database.connection import get_connection
 from evaluation.analytics import compute_batch_analytics
@@ -225,6 +244,112 @@ def api_upload_csv(file: UploadFile = File(...)):
     ]
 
     return {**_decision_counts(results), "warnings": warnings}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Escalation queue — where every REQUIRE_HUMAN decision lands
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class ResolveEscalationRequest(BaseModel):
+    """A reviewer's verdict on one escalated invoice.
+
+    `actor` is in the body only because this demo has no auth layer; in
+    production it comes from the session and a client-supplied value would be
+    a way to forge an approval. See api/escalations.py.
+    """
+
+    resolution: str = Field(description="approved | rejected | deferred")
+    actor: str = Field(min_length=1, description="who is recording this decision")
+    note: str = ""
+    action: Optional[str] = None
+
+
+@app.get("/api/escalations")
+def api_list_escalations():
+    """Open escalations, most urgent first — the human review queue."""
+    return load_open_escalations()
+
+
+@app.get("/api/escalations/summary")
+def api_escalation_summary():
+    """Queue depth and money under review."""
+    return escalation_summary()
+
+
+@app.get("/api/escalations/history")
+def api_escalation_history(limit: int = 50):
+    """Recently resolved escalations, newest first."""
+    return load_resolution_history(limit=limit)
+
+
+@app.get("/api/escalations/{invoice_id}")
+def api_get_escalation(invoice_id: str):
+    """One open case file."""
+    try:
+        return get_escalation(invoice_id)
+    except EscalationNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/escalations/{invoice_id}/resolve")
+def api_resolve_escalation(invoice_id: str, body: ResolveEscalationRequest):
+    """Records a verdict, and on `approved` dispatches one permitted action.
+
+    The three failure modes are distinct on purpose: 404 means there is
+    nothing to resolve, 409 means the invoice moved underneath the reviewer,
+    and 422 means the action asked for is not one the policy engine permits on
+    this invoice — which is a refusal, not a typo.
+    """
+    try:
+        return resolve_escalation(
+            invoice_id=invoice_id,
+            resolution=body.resolution,
+            actor=body.actor,
+            note=body.note,
+            action=body.action,
+            # Simulated, like every other dashboard-triggered action: a review
+            # never creates a live payment link.
+            rzp_client=None,
+        )
+    except EscalationNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except EscalationStale as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ActionNotPermitted as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except EscalationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Razorpay webhook — the push half of reconciliation
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/webhooks/razorpay")
+async def api_razorpay_webhook(request: Request):
+    """Receives a signed Razorpay delivery and reconciles the invoice it settles.
+
+    Reads the raw body, not a parsed model: the signature is computed over the
+    exact bytes Razorpay sent, and re-serialising parsed JSON would produce a
+    different digest for the same delivery.
+
+    A bad signature is 401 and an unconfigured secret is 503 — never 200.
+    Razorpay retries any non-2xx, which is the behaviour we want in both cases:
+    a real delivery we could not authenticate should come back, not vanish.
+    """
+    raw_body = await request.body()
+    signature = request.headers.get("X-Razorpay-Signature", "")
+
+    try:
+        return await asyncio.to_thread(
+            handle_razorpay_webhook, raw_body, signature, build_rzp_client()
+        )
+    except WebhookNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except InvalidSignature as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
 
 @app.post("/api/sync-razorpay")

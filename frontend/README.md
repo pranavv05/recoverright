@@ -40,7 +40,9 @@ src/
     WhyNot.jsx              # what the agent wanted vs. what the engine allowed
     ReasoningChain.jsx      # the recorded ReAct trace — signals + five thoughts
     ClientHealthTab.jsx     # per-client risk tiers, sortable
-    AnalyticsTab.jsx        # recovery by scenario, rule frequency, cohorts
+    EscalationsTab.jsx      # the human review queue — approve / reject / defer
+    AnalyticsTab.jsx        # recovery by scenario, rule frequency, cohorts,
+                            # and the Razorpay Capital candidate panel
     CsvUpload.jsx           # merchant CSV ingestion
     RazorpaySync.jsx        # pull overdue invoices from Razorpay
     Counter.jsx
@@ -55,13 +57,13 @@ components testable without a server.
 
 ## Tests
 
-`npm run test:coverage` — 191 tests, Vitest + React Testing Library on jsdom.
+`npm run test:coverage` — 237 tests, Vitest + React Testing Library on jsdom.
 Coverage thresholds are enforced in `vite.config.js` (95% statements, 90%
 branches); the suite currently sits at ~99% statements.
 
 Nothing here talks to a real backend. The axios instance in `src/api.js` is
 stubbed per test, and `src/test/fixtures.js` holds payloads copied from the
-shapes `api/main.py` actually returns — so a fixture that drifts from the API
+shapes the `api/` modules actually return — so a fixture that drifts from the API
 is a visible edit, not an invisible pass.
 
 What the suite is actually protecting:
@@ -74,6 +76,7 @@ What the suite is actually protecting:
 | `WhyNot.test.jsx` | The refusal panel names the model's recommendation and the engine's reasons, says "blocked" vs "escalated" correctly, and renders nothing for an ALLOW. |
 | `ReasoningChain.test.jsx` | All five thoughts render, missing ones show "—" not `undefined`, and the chain is tinted by the decision it led to. |
 | `ClientHealthTab.test.jsx` | Default sort is worst-risk-first; sorting does not mutate the rows it was given; a missing average sorts last instead of throwing. |
-| `AnalyticsTab.test.jsx` | Recovery bars are clamped to 0–100%; empty panels stay visible with an empty state instead of vanishing. |
 | `CsvUpload.test.jsx` / `RazorpaySync.test.jsx` | Every failure path: a non-CSV rejected before any request, FastAPI's `detail` surfaced, a network error surfaced, controls re-enabled so the action can be retried. |
-| `App.test.jsx` | The four dashboard endpoints go out concurrently; one banner on failure rather than four; invoice ids are percent-encoded; the health→invoices drill-down filters correctly; a batch run refetches. |
+| `EscalationsTab.test.jsx` | What a reviewer can and cannot authorise. The action list comes from the server's `approvable_actions`, never a client-side allowlist; a dispute renders **no Approve control at all**; no dropdown anywhere in the queue offers `send_reminder` or `create_payment_link`; a verdict with no reviewer name is refused before any request. |
+| `AnalyticsTab.test.jsx` | Recovery bars are clamped to 0–100%; empty panels stay visible with an empty state; the Razorpay Capital panel lists only flagged clients, totals the receivable, and shows the qualifying reason. |
+| `App.test.jsx` | Every dashboard endpoint goes out concurrently; one banner on failure rather than five; invoice ids are percent-encoded; the health→invoices drill-down filters correctly; a batch run and an escalation verdict both refetch the whole dashboard. |

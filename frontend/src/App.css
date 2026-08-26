@@ -858,3 +858,285 @@
   line-height: 1.4;
   word-break: break-word;
 }
+
+/* ── Escalation queue ─────────────────────────────────────────────────── */
+/* Priority, not money, is the primary visual axis here: a legal threat on a
+   small invoice outranks a large but ordinary balance, and the colour ramp
+   has to say so before the reader gets to the amount column. */
+
+.badge-priority-urgent {
+  background: rgba(255, 92, 92, 0.18);
+  color: #ff5c5c;
+}
+
+.badge-priority-high {
+  background: rgba(255, 165, 61, 0.15);
+  color: #ffa53d;
+}
+
+.badge-priority-medium {
+  background: rgba(255, 214, 92, 0.13);
+  color: #ffd65c;
+}
+
+.badge-priority-low {
+  background: rgba(150, 150, 150, 0.14);
+  color: #a8a8a8;
+}
+
+.badge-resolution-approved {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+}
+
+.badge-resolution-rejected {
+  background: rgba(255, 92, 92, 0.15);
+  color: #ff5c5c;
+}
+
+.badge-resolution-deferred {
+  background: rgba(139, 148, 158, 0.16);
+  color: #8b949e;
+}
+
+.esc-tab {
+  padding: 0 20px 24px;
+}
+
+.esc-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 0 16px;
+}
+
+.esc-toolbar-summary {
+  font-size: 13px;
+  color: #a8a8a8;
+}
+
+.esc-toolbar-summary strong {
+  color: #e6e6e6;
+}
+
+.esc-actor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #a8a8a8;
+}
+
+.esc-actor input {
+  background: #1a1a1a;
+  border: 1px solid #303030;
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: #e6e6e6;
+  font-size: 13px;
+  min-width: 200px;
+}
+
+.esc-error {
+  background: rgba(255, 92, 92, 0.1);
+  border: 1px solid rgba(255, 92, 92, 0.35);
+  color: #ff8f8f;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+
+.esc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.esc-card {
+  background: #141414;
+  border: 1px solid #262626;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.esc-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: #191919;
+  border-bottom: 1px solid #262626;
+}
+
+.esc-card-invoice {
+  font-weight: 600;
+  color: #e6e6e6;
+  font-size: 14px;
+}
+
+.esc-card-client {
+  color: #a8a8a8;
+  font-size: 13px;
+}
+
+.esc-card-amount {
+  margin-left: auto;
+  color: #e6e6e6;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.esc-card-overdue {
+  color: #ffa53d;
+  font-size: 12px;
+}
+
+.esc-card-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  padding: 14px 16px;
+}
+
+.esc-field-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6b6b6b;
+  margin-bottom: 6px;
+}
+
+.esc-field-value {
+  font-size: 13px;
+  color: #e6e6e6;
+}
+
+.esc-field-sub {
+  font-size: 12px;
+  color: #8b8b8b;
+  margin-top: 3px;
+  line-height: 1.45;
+}
+
+.esc-reasons {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12.5px;
+  color: #d0d0d0;
+  line-height: 1.6;
+}
+
+.esc-note {
+  font-size: 12.5px;
+  color: #d0d0d0;
+  font-style: italic;
+  line-height: 1.5;
+}
+
+.esc-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: #111;
+  border-top: 1px solid #262626;
+}
+
+.esc-action-select,
+.esc-note-input {
+  background: #1a1a1a;
+  border: 1px solid #303030;
+  border-radius: 6px;
+  padding: 7px 10px;
+  color: #e6e6e6;
+  font-size: 13px;
+}
+
+.esc-note-input {
+  flex: 1;
+  min-width: 160px;
+}
+
+.esc-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.esc-btn:disabled {
+  background: #262626;
+  color: #777;
+  cursor: not-allowed;
+}
+
+.esc-btn-approve {
+  background: #238636;
+  color: #fff;
+}
+
+.esc-btn-approve:hover:not(:disabled) {
+  background: #2ea043;
+}
+
+.esc-btn-reject {
+  background: #3a1c1c;
+  color: #ff8f8f;
+}
+
+.esc-btn-reject:hover:not(:disabled) {
+  background: #4a2323;
+}
+
+.esc-btn-defer {
+  background: #262626;
+  color: #d7d7d7;
+}
+
+.esc-btn-defer:hover:not(:disabled) {
+  background: #333;
+}
+
+/* Not a disabled button — there is genuinely nothing to enable. The policy
+   engine permits only handoffs to a person on this invoice, which is what the
+   review already is. */
+.esc-no-action {
+  flex: 1;
+  min-width: 260px;
+  font-size: 12.5px;
+  color: #8b8b8b;
+  line-height: 1.5;
+}
+
+/* The working-capital panel gets the full row: it is the one output of this
+   system that is revenue for Razorpay rather than for the merchant, and it
+   was previously a tooltip on a table cell. */
+.analytics-row-single {
+  grid-template-columns: 1fr;
+}
+
+.analytics-panel-capital {
+  border-color: #3d3016;
+}
+
+.analytics-panel-capital .analytics-panel-title {
+  color: #ffd65c;
+}
+
+.capital-summary {
+  font-size: 13px;
+  color: #a8a8a8;
+  padding: 0 0 10px;
+}
+
+.capital-summary strong {
+  color: #ffd65c;
+}
