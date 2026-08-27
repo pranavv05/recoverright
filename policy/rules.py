@@ -39,7 +39,8 @@ HUMAN_ONLY_ACTIONS = {"escalate_to_human", "flag_for_legal", "cancel_duplicate"}
 
 # The complete set of actions the executor knows how to carry out. Anything
 # outside this set — a hallucinated action, a renamed action, a prompt-injected
-# action — must fail closed to REQUIRE_HUMAN rather than reaching execute_action().
+# action — must fail closed to REQUIRE_HUMAN rather than reaching the
+# Orchestrator (execution/workers.py), which routes ALLOW decisions to a worker.
 KNOWN_ACTIONS = {
     "send_reminder",
     "create_payment_link",

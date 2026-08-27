@@ -33,9 +33,18 @@ from database.connection import get_connection
 from diagnosis.diagnoser import diagnose
 from policy.engine import PolicyInput, evaluate
 from execution.razorpay_client import RazorpayClient
-from execution.actions import execute_action, reconcile_payment
+from execution.actions import reconcile_payment
+from execution.workers import Orchestrator
 
 INVOICE_ID = "DEMO-1010"
+
+# The real production router — the same one api/pipeline.py and
+# api/escalations.py instantiate. This demo used to call execution.actions
+# .execute_action() directly, a second dispatcher that duplicated
+# PaymentLinkWorker's routing logic and was never exercised by the actual
+# pipeline; going through the Orchestrator means this demo fails the same
+# way the real batch would, not a way only the demo could fail.
+_orchestrator = Orchestrator()
 
 DEMO_INVOICE = {
     "invoice_id": INVOICE_ID,
@@ -158,25 +167,35 @@ def main():
         return
 
     print("Step 4: Creating a real Razorpay test-mode payment link...")
-    execution_result = execute_action(
-        action="create_payment_link",
+    execution_result = _orchestrator.execute(
         invoice=invoice,
-        outstanding_paise=outstanding,
-        rzp_client=rzp_client
+        diagnosis=diagnosis,
+        decision=decision,
+        rzp_client=rzp_client,
     )
-    log_audit_event(INVOICE_ID, "execution", {"execution": execution_result})
 
     if execution_result.get("status") == "duplicate_link_prevented":
         # Razorpay rejected a second link for this reference_id. That is the
-        # duplicate protection working, not a failure — reuse the existing link.
+        # duplicate protection working, not a failure — reuse the existing
+        # link. PaymentLinkWorker's own duplicate branch does not insert a
+        # recoveries row (only its success branch does), so this fallback
+        # path — the one place that reuses rather than creates — inserts one
+        # itself; without it, Step 7's reconcile_payment() below would UPDATE
+        # a recoveries row that does not exist and silently match nothing.
         print("  Payment link already exists — Razorpay's reference_id uniqueness")
         print("  rejected the duplicate create. Reusing the existing link.")
         existing_link = fetch_existing_payment_link(rzp_client, INVOICE_ID)
+        insert_recovery(
+            invoice_id=INVOICE_ID,
+            payment_link_id=existing_link["id"],
+            payment_link_url=existing_link["short_url"],
+            amount_requested_paise=outstanding,
+            status="link_created",
+        )
         execution_result = {
             "status": "link_created",
             "payment_link_id": existing_link["id"],
             "short_url": existing_link["short_url"],
-            "amount_paise": outstanding
         }
         print(f"  Reusing existing link: {execution_result['short_url']}\n")
 
@@ -184,13 +203,11 @@ def main():
         print(f"  Payment link creation failed: {execution_result}")
         return
 
-    insert_recovery(
-        invoice_id=INVOICE_ID,
-        payment_link_id=execution_result["payment_link_id"],
-        payment_link_url=execution_result["short_url"],
-        amount_requested_paise=execution_result["amount_paise"],
-        status="link_created"
-    )
+    # No manual insert_recovery() here on the non-duplicate path: the
+    # Orchestrator call above already routed to PaymentLinkWorker, which
+    # inserts the recoveries row itself as part of a successful link
+    # creation (execution/workers.py) — this is the real production path,
+    # so the demo no longer reimplements a step it already performed.
 
     print("Step 5: Payment link created")
     print(f"  Payment link ID:  {execution_result['payment_link_id']}")

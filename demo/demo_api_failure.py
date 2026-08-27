@@ -26,9 +26,17 @@ from audit.trail import insert_invoice, log_audit_event, get_audit_trail, get_re
 from diagnosis.diagnoser import diagnose
 from policy.engine import PolicyInput, evaluate
 from execution.razorpay_client import RazorpayClient
-from execution.actions import execute_action
+from execution.workers import Orchestrator
 
 INVOICE_ID = "INV-1016"
+
+# The real production router — the same one api/pipeline.py and
+# api/escalations.py instantiate. This demo used to call execution.actions
+# .execute_action() directly, a second dispatcher that duplicated
+# PaymentLinkWorker's routing logic and was never exercised by the actual
+# pipeline; going through the Orchestrator means this demo fails the same
+# way the real batch would, not a way only the demo could fail.
+_orchestrator = Orchestrator()
 
 
 def load_invoice(invoice_id: str) -> dict:
@@ -105,13 +113,12 @@ def main():
 
     print("Step 4: Attempting payment link creation with deliberately wrong Razorpay credentials...")
     bad_client = RazorpayClient(key_id="rzp_test_FAKE_KEY", key_secret="FAKE_SECRET")
-    execution_result = execute_action(
-        action="create_payment_link",
+    execution_result = _orchestrator.execute(
         invoice=invoice,
-        outstanding_paise=outstanding,
-        rzp_client=bad_client
+        diagnosis=diagnosis,
+        decision=decision,
+        rzp_client=bad_client,
     )
-    log_audit_event(INVOICE_ID, "execution", {"execution": execution_result})
     print(f"  execution result: {execution_result}\n")
 
     print("Step 5: API failure details")

@@ -523,8 +523,8 @@ def _pytest_collected_count(markexpr: str = None) -> int:
     result = subprocess.run(
         cmd, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=60,
     )
-    # Unfiltered: "868 tests collected in 1.16s"
-    # Filtered:   "864/868 tests collected (4 deselected) in 1.45s"
+    # Unfiltered: "N tests collected in 1.16s"
+    # Filtered:   "M/N tests collected (K deselected) in 1.45s"
     # Group 1 is always the count for the invocation actually being described.
     match = re.search(r"(\d+)(?:/\d+)? tests? collected", result.stdout)
     assert match, (
@@ -535,11 +535,15 @@ def _pytest_collected_count(markexpr: str = None) -> int:
 
 
 def test_readme_quickstart_pytest_count_matches_collection(readme):
-    """"864 tests, no API keys or DB needed" next to `pytest -m "not llm"`.
+    """The "<N> tests, no API keys or DB needed" comment on `pytest -m "not llm"`.
 
     This is the exact command the Quickstart tells a judge to run first, so
     it is checked against the exact collection that command produces —
-    llm-marked tests deselected — rather than the full suite.
+    llm-marked tests deselected — rather than the full suite. Deliberately
+    does not hardcode the expected number in this docstring: that number
+    moves every time a test is added anywhere under pyproject.toml's
+    testpaths, including in this file, so pinning it here would just be a
+    second place for it to go stale.
     """
     match = re.search(r'pytest -m "not llm"\s+#\s*(\d+)\s+tests', readme)
     assert match, 'README quickstart no longer states a test count next to pytest -m "not llm"'
@@ -552,11 +556,12 @@ def test_readme_quickstart_pytest_count_matches_collection(readme):
 
 
 def test_readme_tech_stack_pytest_count_matches_full_collection(readme):
-    """"868 tests" in the Tech Stack table — the full suite, llm-marked tests included.
+    """The "<N> tests" claim in the Tech Stack table — the full suite, llm-marked tests included.
 
     Distinguished from the Quickstart claim above by which collection it
     describes: this one sits next to "Four call the real NVIDIA NIM API ...
     `-m \"not llm\"` deselects them", so it must be the *unfiltered* count.
+    Not hardcoded here for the same reason as the test above.
     """
     match = re.search(r"pytest\s*—\s*(\d+)\s+tests,", readme)
     assert match, "README Tech Stack table no longer states a pytest count"

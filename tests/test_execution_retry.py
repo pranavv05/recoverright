@@ -1,20 +1,39 @@
 """Failure-recovery tests for the Razorpay execution path.
 
-Three layers, all previously untested, all exercised here with a fake client:
+Two layers, exercised here with a fake client:
 
   * `create_payment_link_with_retry` — which errors are retried and which are
     surfaced immediately. Getting this backwards is expensive in both
     directions: retrying a 4xx wastes the budget on a request that can never
     succeed, and *not* retrying a 429 drops a recoverable invoice.
-  * `execute_action` — the dispatcher the demo scripts call, which must map
-    every exception onto a status string rather than propagating.
   * `PaymentLinkWorker`'s live branch — the five exception paths that turn an
     API failure into a result dict, so one invoice's outage cannot take down
     a batch.
 
 `time.sleep` is stubbed throughout and the slept intervals are captured, which
 makes the backoff schedule itself assertable instead of merely slow.
+
+This file used to also test `execution.actions.execute_action` — a second,
+unused dispatcher that duplicated `PaymentLinkWorker`'s routing and was never
+called by the real pipeline (only by two demo scripts, which now call the
+Orchestrator directly). It has been deleted rather than fixed, since the
+routing and worker-execution behaviour it re-tested is already covered, via
+the real production path, by:
+  * `execution/test_workers.py` — `Orchestrator.route()` for every action,
+    including `test_allow_unknown_action_defaults_to_escalation` for the
+    fail-closed case `execute_action`'s `else` branch used to cover.
+  * `tests/test_workers.py` — `WaitWorker`/`InformationWorker`'s actual
+    execute() output (`test_wait_worker_records_the_non_action`,
+    `test_information_worker_drafts_message_not_sends`, etc.), which covers
+    what `execute_action`'s `wait`/`gather_information`/`send_reminder`
+    branches used to check, more thoroughly.
+No coverage was lost — only the dead code and the tests that existed solely
+to describe it.
 """
+
+import ast
+import os
+import re
 
 import pytest
 
@@ -23,13 +42,13 @@ import execution.workers as workers
 from execution.actions import (
     MaxRetriesExceeded,
     create_payment_link_with_retry,
-    execute_action,
 )
 from execution.razorpay_client import (
     DuplicateReferenceError,
     RateLimitError,
     ServerError,
 )
+from tests.conftest import PROJECT_ROOT
 
 INVOICE = {
     "invoice_id": "INV-RETRY-001",
@@ -195,61 +214,6 @@ def test_a_duplicate_reference_is_surfaced_as_its_own_outcome(slept, events):
     assert "api_failure" not in types_of(events)
 
 
-# ── execute_action: every failure becomes a status, never an exception ───
-
-def test_execute_action_creates_a_link_and_reports_the_outstanding_amount(slept, events):
-    result = execute_action("create_payment_link", INVOICE, OUTSTANDING, FakeRazorpay())
-
-    assert result["status"] == "link_created"
-    assert result["payment_link_id"] == "plink_OK"
-    assert result["amount_paise"] == OUTSTANDING
-
-
-@pytest.mark.parametrize(
-    "error,expected_status",
-    [
-        (RateLimitError("429"), "failed_max_retries"),
-        (ServerError("503"), "failed_server_error"),
-        (ValueError("400"), "failed_client_error"),
-        (DuplicateReferenceError("exists"), "duplicate_link_prevented"),
-    ],
-    ids=["rate_limit", "server_error", "client_error", "duplicate"],
-)
-def test_execute_action_maps_every_api_failure_onto_a_status(
-    slept, events, error, expected_status
-):
-    """No exception may escape the dispatcher — a batch has to keep moving."""
-    script = [error] * 3 if isinstance(error, RateLimitError) else [error]
-
-    result = execute_action(
-        "create_payment_link", INVOICE, OUTSTANDING, FakeRazorpay(script)
-    )
-
-    assert result["status"] == expected_status
-
-
-@pytest.mark.parametrize(
-    "action,expected_status",
-    [
-        ("send_reminder", "reminder_simulated"),
-        ("gather_information", "information_gathering_queued"),
-        ("wait", "no_action_within_pattern"),
-    ],
-)
-def test_execute_action_handles_the_non_payment_actions(events, action, expected_status):
-    result = execute_action(action, INVOICE, OUTSTANDING, rzp_client=None)
-    assert result["status"] == expected_status
-
-
-def test_execute_action_fails_closed_on_an_action_it_does_not_know(events):
-    """Anything the policy engine should have caught still must not silently pass."""
-    result = execute_action("launch_the_missiles", INVOICE, OUTSTANDING, rzp_client=None)
-
-    assert result["status"] == "unhandled_action"
-    assert result["action"] == "launch_the_missiles"
-    assert "action_unknown" in types_of(events)
-
-
 # ── PaymentLinkWorker's live branch ──────────────────────────────────────
 
 @pytest.fixture
@@ -337,3 +301,84 @@ def test_a_failed_worker_logs_the_failure_to_the_audit_trail(live_worker):
 
     logged = [e["event_type"] for e in live_worker["events"]]
     assert "worker_failed" in logged
+
+
+# ── Regression guard: execution/actions.py cannot go dead again ──────────
+#
+# execute_action() was a full second dispatcher, called by nothing in api/,
+# execution/workers.py, or audit/ — only by two demo scripts and by its own
+# tests here. Nothing failed as it drifted from PaymentLinkWorker's actual
+# behaviour, because nothing checked that a "production" function was
+# reachable from production code at all. This asserts that property directly,
+# so the next dead dispatcher fails a test instead of sitting unnoticed.
+
+ACTIONS_PATH = os.path.join(PROJECT_ROOT, "execution", "actions.py")
+
+# Directories whose reference to a name doesn't count as "used in
+# production" — a demo script or a test file calling a function is exactly
+# how execute_action stayed looking alive.
+_NON_PRODUCTION_DIR_NAMES = {"demo", "tests"}
+_SKIPPED_DIR_NAMES = {
+    ".venv", "venv", "__pycache__", ".git", "node_modules", ".pytest_cache",
+    ".coverage", "coverage", "dist", "build",
+} | _NON_PRODUCTION_DIR_NAMES
+
+
+def _top_level_function_names(path: str) -> set:
+    """Public, module-level function names defined in a Python file, via AST."""
+    with open(path, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    return {
+        node.name for node in tree.body
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+    }
+
+
+def _production_python_files():
+    """Every first-party .py file that is not a test file and not a demo script.
+
+    "Production" here means: reachable from the batch pipeline, the API, or
+    the dashboard's backend — the paths a judge or a merchant actually
+    exercises. A test file or a demo script referencing a name is exactly
+    the situation this guard exists to catch, not evidence the name is safe.
+    """
+    for root, dirs, files in os.walk(PROJECT_ROOT):
+        dirs[:] = [d for d in dirs if d not in _SKIPPED_DIR_NAMES]
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py":
+                continue
+            yield os.path.join(root, name)
+
+
+def test_every_function_in_execution_actions_is_used_outside_tests_and_demos():
+    """Every function execution/actions.py defines must be called from real code.
+
+    Not "referenced somewhere" — referenced by at least one file that is
+    neither a test nor a demo script. `execute_action` had references (two
+    demo scripts, one test file) right up until it was deleted; that is
+    precisely the gap this closes.
+    """
+    functions = _top_level_function_names(ACTIONS_PATH)
+    assert functions, "execution/actions.py defines no top-level functions to check"
+
+    production_sources = []
+    for path in _production_python_files():
+        if os.path.abspath(path) == os.path.abspath(ACTIONS_PATH):
+            continue
+        with open(path, encoding="utf-8", errors="replace") as f:
+            production_sources.append(f.read())
+
+    unreferenced = [
+        name for name in sorted(functions)
+        if not any(re.search(rf"\b{re.escape(name)}\b", src) for src in production_sources)
+    ]
+
+    assert unreferenced == [], (
+        f"execution/actions.py defines function(s) not referenced by any "
+        f"non-test, non-demo source file: {unreferenced}. If real code no "
+        f"longer needs one of these, delete the function rather than leaving "
+        f"it reachable only from tests/ or demo/ — that is how execute_action "
+        f"went dead without anything failing."
+    )
