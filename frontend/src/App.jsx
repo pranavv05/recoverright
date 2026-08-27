@@ -17,6 +17,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [runningBatch, setRunningBatch] = useState(false)
+  const [batchNotice, setBatchNotice] = useState(null)
 
   const [selectedId, setSelectedId] = useState(null)
   const [auditTrail, setAuditTrail] = useState(null)
@@ -97,11 +98,20 @@ export default function App() {
   const runBatch = async () => {
     setRunningBatch(true)
     setError(null)
+    setBatchNotice(null)
     try {
       await api.post('/api/run-batch')
       await fetchAll()
     } catch (e) {
-      setError(errorMessage(e, 'Batch run failed'))
+      if (e?.response?.status === 409) {
+        // Not a failure — api/routes.py rejected this call because a batch
+        // is already running, not because anything went wrong. Shown as its
+        // own notice rather than routed through the generic error banner,
+        // which is styled and worded for an actual failure.
+        setBatchNotice(errorMessage(e, 'A batch is already running.'))
+      } else {
+        setError(errorMessage(e, 'Batch run failed'))
+      }
     } finally {
       setRunningBatch(false)
     }
@@ -116,9 +126,12 @@ export default function App() {
           <span className="brand-name">RecoverRight</span>
           <span className="brand-sub">Autonomous receivables recovery — decision audit dashboard</span>
         </div>
-        <button className="run-batch-btn" onClick={runBatch} disabled={runningBatch}>
-          {runningBatch ? 'Running batch…' : 'Run Batch'}
-        </button>
+        <div className="run-batch-group">
+          <button className="run-batch-btn" onClick={runBatch} disabled={runningBatch}>
+            {runningBatch ? 'Running batch…' : 'Run Batch'}
+          </button>
+          {batchNotice && <span className="batch-notice">{batchNotice}</span>}
+        </div>
       </header>
 
       {error && <div className="error-banner">Failed to reach API: {error}</div>}

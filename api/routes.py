@@ -193,19 +193,48 @@ def api_sample_csv():
 # ─────────────────────────────────────────────────────────────────────────
 
 
+# Guards against a second concurrent POST /api/run-batch spending LLM quota
+# on top of a batch already in flight. This endpoint is an unauthenticated
+# POST that runs ~100 real model calls against a rate-limited free-tier key
+# (see README § Limitations) — a second call while the first is running
+# would not run a second, independent batch faster; it would compete with
+# the first for the same request budget and make both slower, on top of
+# re-processing the same data/seen.json for no benefit.
+#
+# asyncio.Lock rather than a plain boolean: checking `.locked()` and then
+# entering `async with lock` has no `await` between the two, so on the
+# single event loop this app runs on, no other request's coroutine can be
+# scheduled in the gap — the check and the acquire are effectively atomic. A
+# plain bool guarded the same way would behave identically; the lock is used
+# because "is a batch running" and "am I about to become the one running it"
+# can never disagree with a lock the way they could with two separately
+# updated variables.
+_batch_lock = asyncio.Lock()
+
+
 @app.post("/api/run-batch")
 async def api_run_batch():
     """Triggers the batch pipeline against data/seen.json, simulated (no real Razorpay calls).
 
     Declared `async def`: the batch is itself concurrent, so it belongs on the
     event loop rather than in Starlette's threadpool.
-    """
-    results = await _dispatch_batch_async("data/seen.json", rzp_client=None)
 
-    # Portfolio-level scoring runs once, after every invoice in the batch has
-    # its diagnosis and policy decision on record — never mid-batch, and
-    # never in a way that can change what was just decided above.
-    await asyncio.to_thread(score_client_health)
+    Rejects a second call with 409 while one is already running, rather than
+    starting a second batch on top of it — see `_batch_lock` above.
+    """
+    if _batch_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="A batch is already running — wait for it to finish before starting another.",
+        )
+
+    async with _batch_lock:
+        results = await _dispatch_batch_async("data/seen.json", rzp_client=None)
+
+        # Portfolio-level scoring runs once, after every invoice in the batch has
+        # its diagnosis and policy decision on record — never mid-batch, and
+        # never in a way that can change what was just decided above.
+        await asyncio.to_thread(score_client_health)
 
     return _decision_counts(results)
 

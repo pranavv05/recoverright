@@ -24,7 +24,7 @@ git clone https://github.com/pranavv05/recoverright && cd recoverright
 cp .env.example .env                  # add your free NVIDIA NIM key
 docker compose up -d                  # Postgres
 pip install -r requirements.txt
-python -m pytest -m "not llm"         # 857 tests, no API keys or DB needed
+python -m pytest -m "not llm"         # 859 tests, no API keys or DB needed
 python -m api.main                    # batch over 52 invoices, simulated
 uvicorn api.main:app --port 8000      # then: cd frontend && npm i && npm run dev
 ```
@@ -239,7 +239,7 @@ application code.
 | Payments | Razorpay test-mode Payment Links + Invoices APIs |
 | Frontend | React + Vite dashboard — Invoices, Client Health, Analytics |
 | Infra | Docker Compose |
-| Testing | pytest — 861 tests, 87% line coverage on application code. Four call the real NVIDIA NIM API and skip without a key; `-m "not llm"` deselects them. No test ever calls a real Razorpay account |
+| Testing | pytest — 863 tests, 87% line coverage on application code. Four call the real NVIDIA NIM API and skip without a key; `-m "not llm"` deselects them. No test ever calls a real Razorpay account |
 | Money handling | Integer paise, never floats |
 
 ---
@@ -1023,7 +1023,7 @@ recoverright/
                              # WhyNot, ReasoningChain, ClientHealthTab,
                              # EscalationsTab, AnalyticsTab, CsvUpload,
                              # RazorpaySync, Counter
-    src/**/*.test.{js,jsx}   # 237 Vitest + React Testing Library tests,
+    src/**/*.test.{js,jsx}   # 238 Vitest + React Testing Library tests,
                              # ~99% statement coverage (thresholds enforced
                              # in vite.config.js). See frontend/README.md
     src/test/fixtures.js     # Payloads shaped like the real API responses

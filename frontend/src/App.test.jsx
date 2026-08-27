@@ -340,6 +340,25 @@ describe('App — running a batch', () => {
     expect(screen.getByRole('button', { name: 'Run Batch' })).toBeEnabled()
   })
 
+  it('shows a batch-already-running notice on 409, not the generic error banner', async () => {
+    await renderApp()
+    vi.spyOn(api, 'post').mockRejectedValue({
+      response: { status: 409, data: { detail: 'A batch is already running — wait for it to finish before starting another.' } },
+      message: 'Request failed with status code 409',
+    })
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Run Batch' }))
+
+    expect(
+      await screen.findByText(/A batch is already running/)
+    ).toBeInTheDocument()
+    // The 409 case is api/routes.py's guard working as intended, not a
+    // failure — it must not also render through the generic error banner,
+    // which is worded and styled for an actual API failure.
+    expect(screen.queryByText(/Failed to reach API/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Run Batch' })).toBeEnabled()
+  })
+
   it('picks up new rows and new metrics after a batch', async () => {
     const { post } = await renderApp()
     expect(screen.queryByText('INV-2001')).toBeNull()
