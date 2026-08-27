@@ -483,6 +483,92 @@ def test_requirements_pins_every_import_the_app_needs():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Test-count claims
+#
+# The README states a pytest count in two places, phrased around two
+# different collections (the "not llm" subset a judge actually runs, and the
+# full suite including the four live-LLM tests). A hand-maintained number goes
+# stale the moment someone adds a test and forgets the README — it happened
+# once already ("802 tests" drifted behind the real count). Both are checked
+# by literally re-running pytest's own collector in a subprocess rather than
+# hand-counting, so a new test file anywhere under pyproject.toml's testpaths
+# moves this assertion automatically instead of needing a second edit.
+#
+# The frontend's Vitest count is a separate, cross-language claim. It is
+# deliberately NOT checked here: this module's own docstring promises it runs
+# "offline in well under a second" with no external services, and the backend
+# CI job that runs this file has no Node.js installed at all — a check that
+# shells out to `vitest` would pass on a laptop and fail every time in CI,
+# which is a worse failure mode than the drift it would catch. See
+# frontend/scripts/check-readme-test-count.js for the same check, run in the
+# frontend CI job where Node already exists.
+# ─────────────────────────────────────────────────────────────────────────
+
+def _pytest_collected_count(markexpr: str = None) -> int:
+    """Runs `pytest --collect-only` in a subprocess and returns the count.
+
+    A subprocess rather than in-process collection: this file has already
+    been collected by the time its own tests run, and re-invoking pytest's
+    collector inside that same process risks interfering with the run
+    already in progress. `test_policy_decision_is_reachable_without_
+    importing_diagnosis` above uses the same subprocess pattern for the
+    same reason.
+    """
+    import subprocess
+    import sys
+
+    cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q"]
+    if markexpr:
+        cmd += ["-m", markexpr]
+    result = subprocess.run(
+        cmd, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=60,
+    )
+    # Unfiltered: "868 tests collected in 1.16s"
+    # Filtered:   "864/868 tests collected (4 deselected) in 1.45s"
+    # Group 1 is always the count for the invocation actually being described.
+    match = re.search(r"(\d+)(?:/\d+)? tests? collected", result.stdout)
+    assert match, (
+        f"could not parse pytest collection output "
+        f"(exit {result.returncode}):\n{result.stdout}\n{result.stderr}"
+    )
+    return int(match.group(1))
+
+
+def test_readme_quickstart_pytest_count_matches_collection(readme):
+    """"864 tests, no API keys or DB needed" next to `pytest -m "not llm"`.
+
+    This is the exact command the Quickstart tells a judge to run first, so
+    it is checked against the exact collection that command produces —
+    llm-marked tests deselected — rather than the full suite.
+    """
+    match = re.search(r'pytest -m "not llm"\s+#\s*(\d+)\s+tests', readme)
+    assert match, 'README quickstart no longer states a test count next to pytest -m "not llm"'
+    claimed = int(match.group(1))
+    actual = _pytest_collected_count(markexpr="not llm")
+    assert claimed == actual, (
+        f'README claims {claimed} tests under -m "not llm", collection finds {actual} — '
+        f"update the Quickstart line if a test was added or removed"
+    )
+
+
+def test_readme_tech_stack_pytest_count_matches_full_collection(readme):
+    """"868 tests" in the Tech Stack table — the full suite, llm-marked tests included.
+
+    Distinguished from the Quickstart claim above by which collection it
+    describes: this one sits next to "Four call the real NVIDIA NIM API ...
+    `-m \"not llm\"` deselects them", so it must be the *unfiltered* count.
+    """
+    match = re.search(r"pytest\s*—\s*(\d+)\s+tests,", readme)
+    assert match, "README Tech Stack table no longer states a pytest count"
+    claimed = int(match.group(1))
+    actual = _pytest_collected_count()
+    assert claimed == actual, (
+        f"README Tech Stack table claims {claimed} total tests, "
+        f"the full collection finds {actual} — update that line if a test was added or removed"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Safety claims, verified deterministically
 # ─────────────────────────────────────────────────────────────────────────
 

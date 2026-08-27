@@ -49,4 +49,10 @@ jobs:
       # fails this step rather than passing quietly.
       - run: npm run test:coverage
 
+      # Guards README.md's "<N> Vitest + React Testing Library tests" claim
+      # against a real run, the same way tests/test_readme_claims.py guards
+      # the two backend pytest counts — see that script's own docstring for
+      # why this check lives here instead of in the Python suite.
+      - run: npm run verify:readme-test-count
+
       - run: npm run build
