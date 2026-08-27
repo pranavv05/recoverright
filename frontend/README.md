@@ -22,7 +22,18 @@ npm run lint         # oxlint
 npm test             # vitest, watch mode
 npm run test:run     # vitest, single run
 npm run test:coverage
+npm run verify:readme-test-count   # asserts the root README's frontend test count
 ```
+
+**If the test run fails with `Failed to start forks worker` or `Timeout
+waiting for worker to respond`** — a coverage report near 0% rather than any
+real assertion failure — that is Vitest's worker-startup handshake timing
+out, not a broken suite. `vite.config.js` already pins `singleFork: true` to
+prevent it; if it somehow recurs, re-run once (it passes on a retry), and see
+the comment in `vite.config.js` for what was measured and why the other
+serialisation options were rejected. A stale `node_modules` produces a
+different symptom — `'vitest' is not recognized` — for which the fix is
+`npm ci`.
 
 ## Structure
 
@@ -57,7 +68,7 @@ components testable without a server.
 
 ## Tests
 
-`npm run test:coverage` — 237 tests, Vitest + React Testing Library on jsdom.
+`npm run test:coverage` — 238 tests, Vitest + React Testing Library on jsdom.
 Coverage thresholds are enforced in `vite.config.js` (95% statements, 90%
 branches); the suite currently sits at ~99% statements.
 
