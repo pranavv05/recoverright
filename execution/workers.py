@@ -59,10 +59,29 @@ log = logging.getLogger(__name__)
 # than inventing it — a wrong LOW gets picked up in the queue late, a wrong
 # URGENT trains the finance team to ignore the field.
 #
-# The dynamic reasons (`diagnosed_cause_*`, `unrecognised_*`,
-# `action_not_autonomously_executable:*`) interpolate a cause or action into
-# the string, so they are matched by prefix in _PRIORITY_PREFIXES below
-# rather than by exact lookup.
+# The dynamic reasons (`account_tier_*`, `diagnosed_cause_*`, `unrecognised_*`,
+# `action_not_autonomously_executable:*`) interpolate a tier, cause, or action
+# into the string, so they are matched by prefix in _PRIORITY_PREFIXES below
+# rather than by exact lookup — a key here can never equal one of these
+# reasons as a plain string constant, since the engine only ever produces one
+# via an f-string. The exact-match entries for the two *currently* valid
+# account_tier_*/diagnosed_cause_* values are kept anyway, redundantly with
+# the prefix, so a reviewer reading this dict sees the concrete reasons the
+# engine actually emits today without having to mentally interpolate the
+# template.
+#
+# execution/test_workers.py::test_every_priority_map_key_matches_a_live_
+# engine_reason_or_a_documented_prefix asserts every key below is reachable
+# by one of these two mechanisms, so a rule rename in policy/engine.py that
+# leaves a stale key here fails a test instead of silently defaulting to LOW
+# forever — which is exactly what happened to the three keys removed here
+# (kept in this comment's history, not the dict): a rule rewrite renamed
+# `promise_broken_or_deliberate_stall_requires_human` to the two
+# `diagnosed_cause_*` keys below, `reminder_fatigue_5_or_more_reminders_sent`
+# to `reminder_fatigue_repeated_contact_unresolved`, and
+# `strong_inference_with_no_client_communication_evidence` to
+# `unsupported_inference_no_client_communication` — and the old keys kept
+# sitting here, matching nothing, until this cleanup.
 # ─────────────────────────────────────────────────────────────────────────
 
 PRIORITY_MAP = {
@@ -78,12 +97,9 @@ PRIORITY_MAP = {
     "account_tier_high_value_requires_human_approval": "HIGH",
 
     # ── Automation has already failed, or the evidence will not support it ──
-    "promise_broken_or_deliberate_stall_requires_human": "MEDIUM",
     "diagnosed_cause_promise_broken_requires_human_judgment": "MEDIUM",
     "diagnosed_cause_deliberate_stall_requires_human_judgment": "MEDIUM",
-    "reminder_fatigue_5_or_more_reminders_sent": "MEDIUM",
     "reminder_fatigue_repeated_contact_unresolved": "MEDIUM",
-    "strong_inference_with_no_client_communication_evidence": "MEDIUM",
     "unsupported_inference_no_client_communication": "MEDIUM",
     "unknown_evidence_tier_cannot_trigger_autonomous_action": "MEDIUM",
     "documentation_blocker_client_awaiting_document_from_us": "MEDIUM",
@@ -97,11 +113,18 @@ PRIORITY_MAP = {
 }
 
 # Reasons the engine builds with an f-string, matched on their stable prefix.
+# `account_tier_` is here for the same reason `diagnosed_cause_` is: both are
+# currently fully covered by the exact-match entries above too (their source
+# sets — policy/rules.py's HUMAN_APPROVAL_TIERS and HIGH_RISK_DIAGNOSED_CAUSES
+# — each have exactly two members today), but the prefix is the part that
+# keeps working if a third tier or cause is ever added to either set without
+# anyone remembering to add a matching literal here.
 _PRIORITY_PREFIXES = (
     ("unrecognised_recommended_action:", "MEDIUM"),
     ("unrecognised_evidence_tier:", "MEDIUM"),
     ("action_not_autonomously_executable:", "MEDIUM"),
     ("diagnosed_cause_", "MEDIUM"),
+    ("account_tier_", "HIGH"),
 )
 
 _PRIORITY_ORDER = {"URGENT": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}

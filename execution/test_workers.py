@@ -15,9 +15,11 @@ import pytest
 from policy.engine import PolicyDecision
 from execution.workers import (
     BLOCK_TYPE_MAP,
+    PRIORITY_MAP,
     BlockWorker,
     EscalationWorker,
     Orchestrator,
+    _PRIORITY_PREFIXES,
 )
 
 
@@ -201,6 +203,39 @@ def test_every_block_type_map_key_is_a_real_engine_reason():
     engine = pathlib.Path("policy/engine.py").read_text(encoding="utf-8")
     for reason in BLOCK_TYPE_MAP:
         assert f'"{reason}"' in engine, f"{reason} is not emitted by the engine"
+
+
+def test_every_priority_map_key_matches_a_live_engine_reason_or_a_documented_prefix():
+    """Guards against PRIORITY_MAP drifting the way it already has once.
+
+    A policy rule rename left three PRIORITY_MAP keys matching nothing the
+    engine emits any more (`promise_broken_or_deliberate_stall_requires_human`,
+    `reminder_fatigue_5_or_more_reminders_sent`,
+    `strong_inference_with_no_client_communication_evidence`) — silently, since
+    an unmatched key just falls through to the same LOW default an unmapped
+    reason gets, so nothing ever errored. Each key here must now be either a
+    literal string that appears quoted in policy/engine.py — the same check
+    `test_every_block_type_map_key_is_a_real_engine_reason` above makes for
+    BLOCK_TYPE_MAP — or start with one of _PRIORITY_PREFIXES' declared
+    prefixes, which is how the two f-string-built families
+    (`account_tier_*`, `diagnosed_cause_*`) are covered: neither ever appears
+    as a quoted literal in the engine, since the engine only ever produces one
+    via string interpolation.
+    """
+    import pathlib
+    engine = pathlib.Path("policy/engine.py").read_text(encoding="utf-8")
+    prefixes = tuple(prefix for prefix, _priority in _PRIORITY_PREFIXES)
+
+    unmatched = [
+        reason for reason in PRIORITY_MAP
+        if f'"{reason}"' not in engine and not reason.startswith(prefixes)
+    ]
+    assert unmatched == [], (
+        f"PRIORITY_MAP key(s) match no literal reason in policy/engine.py and "
+        f"no declared prefix in _PRIORITY_PREFIXES: {unmatched} — either the "
+        f"engine's reason string changed and this map fell behind (delete or "
+        f"rename the key to match), or a new dynamic reason needs a prefix"
+    )
 
 
 # ── Structural safety invariant ────────────────────────────────────────────
