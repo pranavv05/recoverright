@@ -54,6 +54,13 @@ def main():
 
     print(f"=== Demo Flow 2: Blocked Dispute — {INVOICE_ID} ===\n")
 
+    print("Arjun runs Arjun Logistics, a B2B supplier chasing overdue")
+    print("invoices across dozens of clients. A generic collections bot")
+    print("would send every one of them the same reminder — including this")
+    print(f"client, {invoice['client_name']}, who is disputing the")
+    print("invoice, not stalling on it. Chasing a disputed invoice doesn't")
+    print("recover money — it escalates a dispute into a lost relationship.\n")
+
     print("Step 1: Invoice details")
     print(f"  Client:        {invoice['client_name']}")
     print(f"  Amount:        {rupees(invoice['amount_paise'])} (outstanding: {rupees(outstanding)})")

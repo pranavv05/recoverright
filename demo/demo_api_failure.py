@@ -65,6 +65,13 @@ def main():
 
     print(f"=== Demo Flow 3: API Failure Handling — {INVOICE_ID} ===\n")
 
+    print(f"Arjun's payment link to this client, {invoice['client_name']}, worked and the client")
+    print("is ready to pay — the diagnosis and policy engine will say so. What")
+    print("this demo actually tests is what happens when Razorpay itself is")
+    print("unreachable at the exact moment RecoverRight tries to act: does it")
+    print("crash, silently drop the invoice, or fail safely with the money")
+    print("column untouched and a human left a clear trail of what happened?\n")
+
     print("Step 1: Invoice details")
     print(f"  Client:        {invoice['client_name']}")
     print(f"  Amount:        {rupees(invoice['amount_paise'])} (outstanding: {rupees(outstanding)})")

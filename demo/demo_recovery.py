@@ -120,6 +120,11 @@ def main():
 
     print(f"=== Demo Flow 1: Recovery — {INVOICE_ID} ({invoice['client_name']}) ===\n")
 
+    print(f"{invoice['client_name']} is ready to pay Arjun Logistics — the only")
+    print("thing standing between the two is a broken payment link nobody fixed.")
+    print("This flow shows the full path from that broken link to money Razorpay")
+    print("has actually confirmed as received — not money the system assumed.\n")
+
     print("Step 1: Invoice details")
     print(f"  Client:        {invoice['client_name']}")
     print(f"  Amount:        {rupees(invoice['amount_paise'])} (outstanding: {rupees(outstanding)})")
