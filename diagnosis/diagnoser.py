@@ -56,8 +56,13 @@ NVIDIA_BASE_URL = os.getenv(
 )
 # meta/llama-3.3-70b-instruct was consistently timing out on NVIDIA's free
 # tier at the time of integration; meta/llama-3.1-8b-instruct responded
-# reliably and fast in repeated live checks.
-NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.1-8b-instruct")
+# reliably and fast in repeated live checks. That model reached end-of-life
+# on NVIDIA NIM on 2026-08-26 (confirmed via a live 410 Gone from the API and
+# absence from the current /v1/models catalog) and meta/llama-3.2-11b-vision-
+# instruct is its replacement — the closest same-family, same-account-
+# accessible instruct model, confirmed to support response_format=json_object
+# cleanly.
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
 MAX_RETRIES = _env_int("NVIDIA_MAX_RETRIES", 6)
 REQUEST_TIMEOUT_SECONDS = _env_float("NVIDIA_REQUEST_TIMEOUT_SECONDS", 30.0)
 
