@@ -465,6 +465,69 @@ def _extract_thoughts(thoughts_text: str) -> dict:
     return trace
 
 
+def _count_thought_markers(text: str) -> int:
+    """Counts how many of the 5 `Thought N` markers are present in `text`."""
+    return sum(
+        1 for n in range(1, 6) if re.search(rf"Thought\s*{n}\b", text, re.IGNORECASE)
+    )
+
+
+# (keywords, diagnosed_cause, recommended_action), checked in order against
+# Thought 5's text. This is a coarse substitute for the model's own
+# structured conclusion — used only when the model dropped the CONCLUSION
+# JSON entirely — so it deliberately mirrors only a handful of the cause
+# categories in REACT_SYSTEM_PROMPT, not the full decision tree.
+_THOUGHT5_KEYWORD_RULES = [
+    (("dispute",), "dispute", "escalate_to_human"),
+    (("payment link", "link", "404"), "payment_link_failure", "create_payment_link"),
+    (("cash flow", "liquidity"), "cash_flow_delay", "create_payment_link"),
+    (("promise", "commitment"), "promise_broken", "escalate_to_human"),
+    (("stall", "avoiding", "silent"), "deliberate_stall", "escalate_to_human"),
+    (("legal", "advocate", "vakeel"), "legal_threat", "flag_for_legal"),
+]
+
+
+def _thought5_keyword_fallback(thought5_text: str, invoice_id: str) -> dict:
+    """Builds a degraded-but-valid diagnosis from Thought 5's prose alone.
+
+    Last resort for _parse_react_output() when the model produced the 5
+    Thought paragraphs but never emitted the CONCLUSION JSON block. Keyword
+    matching against Thought 5 (the cause-and-action paragraph) stands in for
+    the model's own structured conclusion, so the result is always
+    evidence_tier "strong_inference" for a matched cause (never "known" —
+    this is inference from prose, not an explicit client statement) at
+    confidence 0.5, and flows through normalise_diagnosis() and the policy
+    engine exactly like a normal diagnosis.
+    """
+    log.warning(
+        "[%s] ReAct output had no JSON — used Thought 5 keyword fallback", invoice_id
+    )
+    text = (thought5_text or "").lower()
+    for keywords, cause, action in _THOUGHT5_KEYWORD_RULES:
+        if any(keyword in text for keyword in keywords):
+            return {
+                "invoice_id": invoice_id,
+                "diagnosed_cause": cause,
+                "evidence_tier": "strong_inference",
+                "evidence_cited": "Keyword fallback on Thought 5 text (model omitted CONCLUSION JSON).",
+                "recommended_action": action,
+                "reasoning": "Degraded diagnosis inferred from Thought 5 text; CONCLUSION JSON was missing.",
+                "suspicious_content_detected": False,
+                "confidence": 0.5,
+            }
+
+    return {
+        "invoice_id": invoice_id,
+        "diagnosed_cause": "unknown",
+        "evidence_tier": "unknown",
+        "evidence_cited": "No keyword match in Thought 5 text (model omitted CONCLUSION JSON).",
+        "recommended_action": "gather_information",
+        "reasoning": "Degraded diagnosis: no keyword match in Thought 5; CONCLUSION JSON was missing.",
+        "suspicious_content_detected": False,
+        "confidence": 0.5,
+    }
+
+
 def _split_conclusion(text: str) -> tuple:
     """Separates a ReAct response into (thoughts_text, json_source).
 
@@ -491,9 +554,12 @@ def _parse_react_output(raw_output: str, invoice_id: str) -> tuple:
     `diagnosis` is already normalised (normalise_diagnosis()) and ready to
     merge with the reasoning trace and signals in diagnose(). Parsing is
     defensive about formatting but not about content: if no JSON object can
-    be found at all, that is a real failure and raises ValueError with the
-    raw output logged for debugging, exactly as an unparseable single-call
-    diagnosis used to.
+    be found anywhere in the output AND at least 3 of the 5 Thought
+    paragraphs are present, that degrades to a keyword-matched diagnosis
+    (_thought5_keyword_fallback()) rather than failing outright — some
+    models reliably produce the reasoning chain but drop the CONCLUSION JSON.
+    Only a genuinely malformed response (no JSON and fewer than 3 Thoughts)
+    raises ValueError, exactly as an unparseable single-call diagnosis used to.
     """
     text = (raw_output or "").strip()
     if not text:
@@ -503,11 +569,19 @@ def _parse_react_output(raw_output: str, invoice_id: str) -> tuple:
         thoughts_text, json_source = _split_conclusion(text)
         diagnosis_raw = json.loads(json_source)
     except (ValueError, json.JSONDecodeError) as e:
-        log.error(
-            "[%s] could not parse ReAct output: %s\n--- raw output ---\n%s\n--- end raw output ---",
-            invoice_id, e, text[:4000]
+        if _count_thought_markers(text) < 3:
+            log.error(
+                "[%s] could not parse ReAct output: %s\n--- raw output ---\n%s\n--- end raw output ---",
+                invoice_id, e, text[:4000]
+            )
+            raise ValueError(f"ReAct output for {invoice_id} was not parseable: {e}") from e
+
+        reasoning_trace = _extract_thoughts(text)
+        fallback_raw = _thought5_keyword_fallback(
+            reasoning_trace["thought_5_cause_and_action"], invoice_id
         )
-        raise ValueError(f"ReAct output for {invoice_id} was not parseable: {e}") from e
+        diagnosis = normalise_diagnosis(fallback_raw, invoice_id)
+        return reasoning_trace, diagnosis
 
     reasoning_trace = _extract_thoughts(thoughts_text)
     diagnosis = normalise_diagnosis(diagnosis_raw, invoice_id)

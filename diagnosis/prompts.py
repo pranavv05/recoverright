@@ -315,6 +315,41 @@ CRITICAL RULES (same as before):
 
 Return the five Thought paragraphs followed by the CONCLUSION JSON.
 The JSON must be valid and parseable.
+
+MANDATORY: After completing all 5 Thoughts, you MUST output
+a CONCLUSION section containing valid JSON. This JSON is
+required — do not omit it under any circumstances.
+
+Format your response like this:
+
+Thought 1 — Engagement analysis:
+[your analysis]
+
+Thought 2 — Content analysis:
+[your analysis]
+
+Thought 3 — Payment history analysis:
+[your analysis]
+
+Thought 4 — Evidence quality assessment:
+[your analysis]
+
+Thought 5 — Cause and action determination:
+[your analysis]
+
+CONCLUSION:
+{
+  "invoice_id": "INV-XXXX",
+  "diagnosed_cause": "one of the valid causes",
+  "evidence_tier": "known|strong_inference|unknown",
+  "evidence_cited": "one sentence citing specific evidence",
+  "recommended_action": "one of the valid actions",
+  "reasoning": "one sentence summary",
+  "suspicious_content_detected": false,
+  "confidence": 0.85
+}
+
+The CONCLUSION JSON block is mandatory. Output it every time.
 """
 
 REACT_USER_TEMPLATE = """
