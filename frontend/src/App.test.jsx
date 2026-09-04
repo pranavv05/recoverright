@@ -111,10 +111,10 @@ describe('App — initial load', () => {
     expect(flagged.container.querySelector('.tone-red')).toBeInTheDocument()
   })
 
-  it('opens on the invoices tab with the detail panel empty', async () => {
+  it('opens on the invoices tab with the detail modal closed', async () => {
     await renderApp()
     expect(screen.getByRole('button', { name: 'Invoices' })).toHaveClass('active')
-    expect(screen.getByText('Select an invoice to see its full audit trail.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Close audit trail' })).toBeNull()
   })
 })
 
@@ -224,14 +224,14 @@ describe('App — audit trail', () => {
     expect(screen.getByText('AUDIT TRAIL')).toBeInTheDocument()
   })
 
-  it('closes the panel and returns to the prompt', async () => {
+  it('closes the modal and returns to the prompt', async () => {
     await renderApp({ trails: { 'INV-1042': blockedTrail } })
     const user = userEvent.setup()
     await user.click(screen.getByText('INV-1042'))
     await screen.findByText('AUDIT TRAIL')
 
     await user.click(screen.getByRole('button', { name: 'Close audit trail' }))
-    expect(screen.getByText('Select an invoice to see its full audit trail.')).toBeInTheDocument()
+    expect(screen.queryByText('AUDIT TRAIL')).toBeNull()
   })
 })
 

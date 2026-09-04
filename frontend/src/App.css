@@ -671,31 +671,43 @@
   cursor: help;
 }
 
-/* ── Detail panel ────────────────────────────────────────── */
+/* ── Detail modal ────────────────────────────────────────── */
 
-.detail-panel {
-  width: 420px;
-  flex-shrink: 0;
-  border-left: 1px solid #262626;
-  padding: 20px;
-  overflow-y: auto;
-}
-
-.detail-empty {
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #6b6b6b;
-  font-size: 13px;
-  text-align: center;
-  padding: 40px;
+  z-index: 1000;
+}
+
+.detail-panel {
+  width: 100%;
+  max-width: 900px;
+  max-height: 85vh;
+  margin: 20px;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .detail-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 16px;
+  padding: 20px;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.detail-body {
+  padding: 20px;
+  overflow-y: auto;
 }
 
 .detail-title {

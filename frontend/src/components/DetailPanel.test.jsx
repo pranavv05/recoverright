@@ -5,9 +5,9 @@ import DetailPanel from './DetailPanel'
 import { blockedInvoice, blockedTrail, allowedTrail, allowedInvoice } from '../test/fixtures'
 
 describe('DetailPanel', () => {
-  it('prompts for a selection when no invoice is open', () => {
-    render(<DetailPanel invoiceId={null} onClose={vi.fn()} />)
-    expect(screen.getByText('Select an invoice to see its full audit trail.')).toBeInTheDocument()
+  it('renders nothing when no invoice is open', () => {
+    const { container } = render(<DetailPanel invoiceId={null} onClose={vi.fn()} />)
+    expect(container).toBeEmptyDOMElement()
   })
 
   it('shows the invoice id, client and outstanding balance in the header', () => {
@@ -129,6 +129,32 @@ describe('DetailPanel', () => {
     const onClose = vi.fn()
     render(<DetailPanel invoiceId="INV-1042" trail={blockedTrail} loading={false} onClose={onClose} />)
     await user.click(screen.getByRole('button', { name: 'Close audit trail' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes when the overlay behind the modal is clicked', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    const { container } = render(
+      <DetailPanel invoiceId="INV-1042" trail={blockedTrail} loading={false} onClose={onClose} />
+    )
+    await user.click(container.querySelector('.modal-overlay'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not close when the modal content itself is clicked', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    render(<DetailPanel invoiceId="INV-1042" trail={blockedTrail} loading={false} onClose={onClose} />)
+    await user.click(screen.getByText('AUDIT TRAIL'))
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('closes when Escape is pressed', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    render(<DetailPanel invoiceId="INV-1042" trail={blockedTrail} loading={false} onClose={onClose} />)
+    await user.keyboard('{Escape}')
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
