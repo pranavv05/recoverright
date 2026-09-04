@@ -71,6 +71,21 @@ def main():
 
     print("Step 2: Diagnosis")
     diagnosis = diagnose(invoice, api_key)
+    # Mirrors api/pipeline.py: the ReAct reasoning chain is audit-only and gets
+    # its own event, popped off before the diagnosis event is logged, so the
+    # audit trail for this invoice matches what the real batch would produce.
+    reasoning_trace = diagnosis.pop("_reasoning_trace", {})
+    signals = diagnosis.pop("_signals", {})
+    log_audit_event(INVOICE_ID, "reasoning_trace", {
+        "diagnosis": {
+            "signals": signals,
+            "thought_1_engagement": reasoning_trace.get("thought_1_engagement"),
+            "thought_2_content": reasoning_trace.get("thought_2_content"),
+            "thought_3_payment_history": reasoning_trace.get("thought_3_payment_history"),
+            "thought_4_evidence_quality": reasoning_trace.get("thought_4_evidence_quality"),
+            "thought_5_cause_and_action": reasoning_trace.get("thought_5_cause_and_action"),
+        },
+    })
     log_audit_event(INVOICE_ID, "diagnosis", {"diagnosis": diagnosis})
     print(f"  Cause:               {diagnosis.get('diagnosed_cause')}")
     print(f"  Evidence tier:       {diagnosis.get('evidence_tier')}")

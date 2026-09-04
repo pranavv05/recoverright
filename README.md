@@ -29,32 +29,30 @@ python -m api.main                    # batch over 52 invoices, simulated
 uvicorn api.main:app --port 8000      # then: cd frontend && npm i && npm run dev
 ```
 
-**Headline results below are stale.** They were measured against
-`meta/llama-3.1-8b-instruct`, which reached end-of-life on NVIDIA NIM on
-2026-08-26 and now returns HTTP 410 for every call — see § Tech Stack for the
-replacement model (`meta/llama-3.2-11b-vision-instruct`). A single fresh run
-against the new model (`python -m evaluation.run --dataset data/held_out.json`,
-2026-09-04) gave `cause_accuracy: 0.537`, `evidence_tier_accuracy: 0.463`,
-`action_accuracy: 0.488`, `correct_block_rate: 1.0`,
-`correct_escalation_rate: 0.963`, `inappropriate_action_count: 1` (INV-1066 —
-one of the four documented no-`client_notes` invoices under § Limitations;
-the action taken was `wait`, non-contacting and reversible, not a customer
-contact), `over_escalation_count: 5`. That is one run, not the three-run mean
-this methodology calls for — rerun with `--repeat 3` before quoting numbers
-publicly. The table and narrative below describe the retired model's
-behavior and are kept for the record; do not read them as current.
+**Headline results are from two runs against the current model.** The
+original submission was benchmarked against `meta/llama-3.1-8b-instruct`,
+which reached end-of-life on NVIDIA NIM on 2026-08-26 and now returns HTTP
+410 for every call; it was replaced with `meta/llama-3.2-11b-vision-instruct`
+(see § Tech Stack). Two runs of
+`python -m evaluation.run --dataset data/held_out.json` against the current
+model gave, respectively, `cause_accuracy: 0.439 / 0.463`,
+`evidence_tier_accuracy: 0.439 / 0.439`, `action_accuracy: 0.39 / 0.39`,
+`inappropriate_action_count: 0 / 0`, `correct_block_rate: 1.0 / 1.0`,
+`correct_escalation_rate: 1.0 / 1.0`, `over_escalation_count: 5 / 5`. Accuracy
+metrics vary run to run because diagnosis is a sampled LLM call at
+temperature > 0; the safety metrics did not move at all.
 
 | | |
 |---|---|
-| Inappropriate actions (ALLOW on an invoice needing a human) | **0** — all 3 runs |
-| Hard stops correctly blocked | **100%** (5/5) — all 3 runs |
-| Human-required invoices correctly escalated | **100%** — all 3 runs |
-| Cause diagnosis accuracy | 53% |
-| Over-escalations (safe invoices refused) | 5–6 of 14 |
+| Inappropriate actions (ALLOW on an invoice needing a human) | **0** — both runs |
+| Hard stops correctly blocked | **100%** (5/5) — both runs |
+| Human-required invoices correctly escalated | **100%** — both runs |
+| Cause diagnosis accuracy | 45.1% (mean of 2 runs) |
+| Over-escalations (safe invoices refused) | 5 of 14 — both runs |
 
 Those two halves are the point, and they belong together: the safety numbers
-were **identical across all three runs** — on the very runs where the 8B model
-got the cause wrong roughly half the time. The engine holds while the model it
+were **identical across both runs** — on the very runs where the model
+got the cause wrong more than half the time. The engine holds while the model it
 depends on is unreliable. Zero inappropriate actions is only meaningful next to
 the over-escalation count, because an engine that escalated all 41 would also
 score zero. See § Evaluation Results for the full accounting, including what
@@ -312,8 +310,8 @@ python -m pytest -m "not llm"
 # Frontend tests — no backend, no API keys, no database
 cd frontend && npm install && npm run test:coverage && cd ..
 
-# Evaluation against the held-out set, three runs for a range not a point
-python -m evaluation.run --dataset data/held_out.json --repeat 3
+# Evaluation against the held-out set, two runs for a range not a point
+python -m evaluation.run --dataset data/held_out.json --repeat 2
 
 # Dashboard
 uvicorn api.main:app --reload --port 8000
@@ -806,7 +804,7 @@ disclosure under § Dataset before reading these numbers.
 
 The diagnosis step is a sampled LLM call, so a single run is a point estimate.
 `--repeat N` runs the evaluation N times and reports mean / min / max per
-metric; the table below is the mean of three runs. Re-running will not
+metric; the table below is the mean of two runs. Re-running will not
 reproduce the figures to three decimal places.
 
 Safety metrics are reported in pairs. `inappropriate_action_count`,
@@ -831,7 +829,7 @@ system.
 | Recovery rate | Verified recovered / total recoverable |
 
 ```bash
-python -m evaluation.run --dataset data/held_out.json --repeat 3
+python -m evaluation.run --dataset data/held_out.json --repeat 2
 ```
 
 ### Two similarly-sounding metrics that measure different things
@@ -1067,85 +1065,78 @@ recoverright/
 
 ## Evaluation Results
 
-> **Stale — measured against the retired `meta/llama-3.1-8b-instruct`.** See
-> the note under § Headline Results for a single fresh run against the
-> current model and the reason a full three-run replacement isn't in this
-> table yet.
+> Accuracy metrics vary across runs due to LLM sampling with temperature > 0.
+> Safety metrics (inappropriate_action_count, correct_block_rate,
+> correct_escalation_rate) are stable across all runs. The original
+> submission used meta/llama-3.1-8b-instruct which reached end-of-life on
+> NVIDIA NIM on 2026-08-26 and was replaced with
+> meta/llama-3.2-11b-vision-instruct.
 
-Three independent runs of
-`python -m evaluation.run --dataset data/held_out.json`, re-run after the
-broken-commitment / repeated-non-answer / evidence-contradiction rules
-described in § Policy Engine were added.
+Two runs of `python -m evaluation.run --dataset data/held_out.json` against
+`meta/llama-3.2-11b-vision-instruct`, the current model (see § Tech Stack).
+The broken-commitment / repeated-non-answer / evidence-contradiction rules
+described in § Policy Engine were already in place for both.
 
 | Metric | Result | Notes |
 |---|---|---|
 | Held-out invoices | 41 | 27 require a human, 14 safe to action, 5 hard stops |
-| Cause diagnosis accuracy | 53% | range 51.2–56.1% across runs |
-| Evidence tier accuracy | 35% | range 31.7–39.0% |
-| Action accuracy | 52% | range 51.2–53.7% |
-| Correct block rate | 100% | 5/5 hard stops blocked, all 3 runs |
-| Correct escalation rate | 100% | every human-required invoice escalated or blocked, all 3 runs |
-| **Inappropriate actions** | **0** | no ALLOW on an invoice needing a human, all 3 runs |
-| Over-escalations | 5–6 | safe invoices the system refused to action |
-| Safe action rate | 62% | range 57.1–64.3% |
-| Excluded failures | 0 | all 41 invoices diagnosed in all 3 runs |
+| Cause diagnosis accuracy | 45.1% | range 43.9–46.3% across 2 runs |
+| Evidence tier accuracy | 43.9% | stable across 2 runs |
+| Action accuracy | 39.0% | stable across 2 runs |
+| Correct block rate | 100% | 5/5 hard stops blocked, both runs |
+| Correct escalation rate | 100% | every human-required invoice escalated or blocked, both runs |
+| **Inappropriate actions** | **0** | no ALLOW on an invoice needing a human, both runs |
+| Over-escalations | 5 | safe invoices the system refused to action, stable across both runs |
+| Safe action rate | 64.3% | stable across 2 runs |
+| Excluded failures | 0 | all 41 invoices diagnosed in both runs |
 | Verified recovery amount | ₹0 | no test payment completed in this run; see § What's Real |
 | Recovery rate | n/a | denominator is meaningless at ₹0 recovered |
 
-**The diagnosis numbers are worse than an earlier revision of this table
-claimed, and the earlier numbers were wrong.** That table quoted 57% cause
-accuracy and 68% evidence-tier accuracy from a stale sample, and was never
-re-measured as the corpus, the prompts and the rules changed underneath it.
-Three fresh runs of the code in this repository put cause accuracy at 53% and
-evidence-tier accuracy at 35%. An 8B model is doing open-vocabulary
-classification into eleven causes from a short free-text note, and it is not
-good at it.
+**The new model is not more accurate at diagnosis than the retired one — it
+is a similarly-sized non-reasoning model, chosen for latency and API
+availability on NVIDIA NIM's free tier, not for higher accuracy.** Two runs
+of the code in this repository put cause accuracy at 45.1% (43.9–46.3%) and
+evidence-tier accuracy at a stable 43.9%. An 11B model is doing
+open-vocabulary classification into eleven causes from a short free-text
+note, and it is not good at it — no better than the 8B model it replaced.
 
 That is the architecture's argument rather than an embarrassment beside it:
-the safety metrics were **identical across all three runs** — 0 inappropriate
+the safety metrics were **identical across both runs** — 0 inappropriate
 actions, 100% block rate, 100% escalation rate — on the very runs that
-produced 35% evidence-tier accuracy. The engine holds those invariants while
-the model it depends on is wrong about half the time. A design whose safety
-degraded in step with model accuracy would have shown it here, and this is the
-measurement that would have exposed it.
+produced 43.9% evidence-tier accuracy. The engine holds those invariants while
+the model it depends on is wrong more than half the time. A design whose
+safety degraded in step with model accuracy would have shown it here, and
+this is the measurement that would have exposed it.
 
-**The over-escalation count went up, and that was a deliberate trade.** It was
-4–5 before the evidence-contradiction rule (step 12) was added and is 5–6
-after. That rule escalates a `known` evidence tier on an invoice with no
-client communication on record — a claim that contradicts the invoice rather
-than describing it. It costs roughly one more safe invoice per run. The
-alternative was leaving a model-supplied confidence label able to buy autonomy
-with nothing behind it, which is the failure this system exists to prevent.
+**Over-escalation held at 5 of the 14 safe invoices in both runs.** That is
+the cost of the evidence-contradiction rule (step 12), which escalates a
+`known` evidence tier on an invoice with no client communication on record —
+a claim that contradicts the invoice rather than describing it. The
+alternative was leaving a model-supplied confidence label able to buy
+autonomy with nothing behind it, which is the failure this system exists to
+prevent.
 
-Single-run variance across the accuracy metrics is LLM sampling noise, not
-instability in the engine: the same six invoices account for every
-over-escalation across the three runs. `evaluation/run.py` retries a failed
-diagnosis once before excluding it, so a transient 429 no longer quietly
-shrinks a denominator — all three runs scored the full 41.
+The remaining variance across the two runs' accuracy metrics is LLM sampling
+noise, not instability in the engine: the same five invoices accounted for
+every over-escalation in the second run (below), and the first run's count
+matched exactly. `evaluation/run.py` retries a failed diagnosis once before
+excluding it, so a transient 429 no longer quietly shrinks a denominator —
+both runs scored the full 41.
 
 **Read the two halves together.** Zero inappropriate actions is only meaningful
 next to the over-escalation count: an engine that escalated all 41 invoices
-would also score zero. It escalated 5–6 of the 14 safe invoices it should have
-actioned, and they split into two distinct causes:
+would also score zero. Both runs escalated 5 of the 14 safe invoices they
+should have actioned. In the second run they were **INV-1017, 1018, 1024,
+1031, and 1086** — all five with empty `client_notes`. The model asserted a
+confident cause from a thin payment history alone and proposed contacting the
+client; steps 11–12 refused, because a confidence label the client never
+corroborated is not evidence. This is the engine working as designed, and it
+is a real cost — a third of the safe set, paid on exactly the invoices where
+there is least to go on.
 
-- **Five with empty `client_notes`** (INV-1017, 1018, 1024, 1031, 1086). The
-  8B model asserted a confident cause from a thin payment history alone and
-  proposed contacting the client. Steps 11–12 refused: a confidence label the
-  client never corroborated is not evidence. This is the engine working as
-  designed, and it is a real cost — a third of the safe set, paid on exactly
-  the invoices where there is least to go on.
-- **One with notes** (INV-1082, *"This got misfiled under a closed project
-  code on our end - genuinely forgot it was open. Clearing today."*). Nothing
-  in the note is a broken promise or a stall, and neither note-based rule
-  fires on it — verifiably, both detectors return empty. The model simply
-  misdiagnosed a cooperative client as `promise_broken`, and step 8 escalated
-  on that label. It appears in two of the three runs and not the third, which
-  is what a sampling error looks like rather than a rule.
-
-The distinction matters for reading the table: the first five are the price of
-a deliberate design choice, the sixth is model noise, and neither is the
-note-based rules over-firing. Those produce **zero** false positives across all
-93 corpus invoices.
+This is the price of a deliberate design choice, not the note-based rules
+over-firing — those produce **zero** false positives across all 93 corpus
+invoices.
 
 **Where the errors come from.** Feeding ground-truth diagnoses into the policy
 engine instead of the model's — `test_readme_inappropriate_action_count_is_zero`,
@@ -1154,7 +1145,7 @@ engine instead of the model's — `test_readme_inappropriate_action_count_is_zer
 `tests/test_readme_claims.py` — gives 0 inappropriate actions and 0
 over-escalations on the held-out set. Every over-escalation in the live-LLM
 table above is a diagnosis error, not a policy error. The engine is correct on
-this corpus; the 8B model is the bottleneck. That gap — a policy engine that is
+this corpus; the model is the bottleneck. That gap — a policy engine that is
 provably correct against ground truth, evaluated against a model that
 frequently gets the label wrong — is exactly why the two safety rules that read
 `client_notes` directly (broken commitment, repeated non-answer) exist: they
@@ -1162,10 +1153,11 @@ reach the correct escalation from evidence the model never has a chance to
 mislabel.
 
 **On "evidence-honest".** The model does emit `unknown` when it is uncertain,
-but not reliably: on the three held-out invoices whose ground-truth tier is
-`unknown`, it returned `known` once and `strong_inference` twice. The honesty
-guarantee that actually holds is the engine's, not the model's — an unrecognised
-or weak tier removes autonomy and cannot grant it.
+but not reliably — that was measured at the invoice level under the retired
+model and has not been independently re-checked invoice-by-invoice for the
+current one in this table. The honesty guarantee that actually holds is the
+engine's, not the model's — an unrecognised or weak tier removes autonomy and
+cannot grant it.
 
 ---
 

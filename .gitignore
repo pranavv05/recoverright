@@ -9,5 +9,8 @@ frontend/dist/
 frontend/coverage/
 # Evaluation run output, ad-hoc connectivity test, logs
 eval_output.txt
+eval_output2.txt
 test_nim.py
 *.log
+# ffmpeg merge file / stray demo artifacts
+filelist.txt
