@@ -1,15 +1,19 @@
 """Demo flow 1: successful end-to-end recovery — a real Razorpay test-mode
-payment link is created for a synthetic demo invoice, opened in the browser,
-and polled until the test payment clears.
+payment link is created for a real invoice from data/seen.json, opened in
+the browser, and polled until the test payment clears.
 
-DEMO-1010 is a synthetic fixture, not one of the 52 real invoices in
-data/seen.json. It mirrors INV-1010 (Star Bazaar Enterprises, same
-payment_link_failure scenario, same client notes) at a smaller amount so it
-stays under this Razorpay test account's Payment Link cap.
+INV-1016 (Solapur Textile Mills) is one of the 52 real invoices — a genuine
+payment_link_failure case ("ready to pay today, just need a working link"),
+standard account tier, so the policy engine clears it to ALLOW rather than
+routing it to REQUIRE_HUMAN. Every field here is the real invoice's data
+except amount_paise, which is capped below the real ₹1,65,035 to stay under
+this Razorpay test account's Payment Link cap; --reset restores the real
+amount afterward.
 
-Standalone — does not require the batch pipeline to have been run first.
-Requires completing a real test-mode payment in the browser; this script
-will not finish automatically.
+Standalone — does not require the batch pipeline to have been run first,
+though INV-1016 is expected to already exist in the invoices table (loaded
+by the batch pipeline from data/seen.json). Requires completing a real
+test-mode payment in the browser; this script will not finish automatically.
 """
 import argparse
 import os
@@ -36,7 +40,7 @@ from execution.razorpay_client import RazorpayClient
 from execution.actions import reconcile_payment
 from execution.workers import Orchestrator
 
-INVOICE_ID = "DEMO-1010"
+INVOICE_ID = "INV-1016"
 
 # The real production router — the same one api/pipeline.py and
 # api/escalations.py instantiate. This demo used to call execution.actions
@@ -46,10 +50,14 @@ INVOICE_ID = "DEMO-1010"
 # way the real batch would, not a way only the demo could fail.
 _orchestrator = Orchestrator()
 
-DEMO_INVOICE = {
+# INV-1016's real amount_paise, from data/seen.json — reset_demo() restores
+# this after the demo overwrites it with the Razorpay-cap-safe amount below.
+REAL_AMOUNT_PAISE = 16503500
+
+REAL_INVOICE = {
     "invoice_id": INVOICE_ID,
-    "client_name": "Star Bazaar Enterprises (Demo)",
-    "client_type": "retail_chain",
+    "client_name": "Solapur Textile Mills",
+    "client_type": "small_manufacturer",
     "amount_paise": 4500000,
     "days_overdue": 10,
     "partial_payment_received_paise": 0,
@@ -57,8 +65,8 @@ DEMO_INVOICE = {
     "payment_link_attempts": 3,
     "reminders_sent": 1,
     "reminders_opened": 1,
-    "client_notes": "The Razorpay link throws a 404 error. Please share a fresh one.",
-    "client_payment_history": ["paid_on_time"] * 6,
+    "client_notes": "We are ready to pay today itself, just need a working payment link - the current one is expired.",
+    "client_payment_history": ["paid_on_time"] * 5 + ["paid_late"],
     "account_value_tier": "standard",
     "scenario_type": "payment_link_failure",
     "true_cause": "payment_link_failure",
@@ -75,14 +83,23 @@ def rupees(paise: int) -> str:
 
 
 def reset_demo():
-    """Deletes DEMO-1010 from invoices, cascading to its audit_log and recoveries rows,
-    so the script can be run again from scratch."""
+    """Clears the demo's audit_log and recoveries rows for INV-1016 and restores its
+    real amount_paise, so the script can be run again from scratch without leaving
+    the demo's Razorpay-cap-safe amount stuck on a real invoice.
+
+    Unlike the old DEMO-1010 fixture, INV-1016 is one of the 52 real invoices — it
+    must keep existing in the invoices table for the rest of the dashboard (analytics,
+    client health) to still account for it, so this does not delete the invoices row."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM audit_log WHERE invoice_id = %s", (INVOICE_ID,))
             cur.execute("DELETE FROM recoveries WHERE invoice_id = %s", (INVOICE_ID,))
-            cur.execute("DELETE FROM invoices WHERE invoice_id = %s", (INVOICE_ID,))
-    print(f"[RESET] Cleared {INVOICE_ID} from invoices, recoveries, and audit_log\n")
+            cur.execute(
+                "UPDATE invoices SET amount_paise = %s, outstanding_balance_paise = %s "
+                "WHERE invoice_id = %s",
+                (REAL_AMOUNT_PAISE, REAL_AMOUNT_PAISE, INVOICE_ID)
+            )
+    print(f"[RESET] Cleared {INVOICE_ID}'s recoveries/audit_log and restored its real amount\n")
 
 
 def fetch_existing_payment_link(rzp_client: RazorpayClient, reference_id: str) -> dict:
@@ -102,8 +119,8 @@ def fetch_existing_payment_link(rzp_client: RazorpayClient, reference_id: str) -
 
 
 def main():
-    print("[DEMO FIXTURE — synthetic invoice for demonstration purposes]")
-    print("[Same scenario as INV-1010: payment link failure, client ready to pay]\n")
+    print("[REAL INVOICE — one of the 52 in data/seen.json, amount capped to stay]")
+    print("[under this Razorpay test account's Payment Link limit — run --reset after]\n")
 
     api_key = os.environ.get("NVIDIA_API_KEY")
     if not api_key or api_key == "your_nvidia_api_key_here":
@@ -115,7 +132,7 @@ def main():
         raise SystemExit("RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set in .env")
     rzp_client = RazorpayClient(key_id=key_id, key_secret=key_secret)
 
-    invoice = DEMO_INVOICE
+    invoice = REAL_INVOICE
     outstanding = invoice["amount_paise"] - invoice["partial_payment_received_paise"]
 
     print(f"=== Demo Flow 1: Recovery — {INVOICE_ID} ({invoice['client_name']}) ===\n")
@@ -251,7 +268,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--reset", action="store_true",
-        help=f"Delete {INVOICE_ID} from invoices (cascades to audit_log/recoveries) before running"
+        help=f"Clear {INVOICE_ID}'s recoveries/audit_log and restore its real amount before running"
     )
     args = parser.parse_args()
 
