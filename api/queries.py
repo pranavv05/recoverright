@@ -74,8 +74,18 @@ def _load_invoice_rows() -> list:
     for inv in invoices:
         invoice_id = inv["invoice_id"]
         diagnosis_row = diagnoses.get(invoice_id)
+        failure_row = diagnosis_failures.get(invoice_id)
         policy_row = policy_decisions.get(invoice_id)
         execution_row = executions.get(invoice_id)
+
+        # A failure only still applies if no diagnosis exists, or the latest
+        # diagnosis is not more recent than the latest failure — i.e. the
+        # invoice was never retried, or every retry since the failure has
+        # itself failed. A diagnosis timestamped after the failure means a
+        # retry succeeded, so the warning state must not stick around forever.
+        diagnosis_failed = failure_row is not None and (
+            diagnosis_row is None or diagnosis_row["created_at"] <= failure_row["created_at"]
+        )
 
         rows.append({
             "invoice_id": invoice_id,
@@ -88,7 +98,7 @@ def _load_invoice_rows() -> list:
             "client_notes": inv["client_notes"],
             "processed_at": inv["processed_at"],
             "diagnosis": diagnosis_row["diagnosis"] if diagnosis_row else None,
-            "diagnosis_failed": invoice_id in diagnosis_failures,
+            "diagnosis_failed": diagnosis_failed,
             "policy_decision": policy_row["decision"] if policy_row else None,
             "policy_reasons": policy_row["reasons"] if policy_row else [],
             "execution_status": (
