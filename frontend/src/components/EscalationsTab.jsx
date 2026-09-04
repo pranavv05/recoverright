@@ -12,7 +12,8 @@ function EscalationCard({ case_, actor, onResolved, onError }) {
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(null)
 
-  const resolve = async (resolution) => {
+  const resolve = async (resolution, e) => {
+    e?.preventDefault()
     if (!actor.trim()) {
       onError('Enter your name or email before recording a decision')
       return
@@ -98,8 +99,9 @@ function EscalationCard({ case_, actor, onResolved, onError }) {
               ))}
             </select>
             <button
+              type="button"
               className="esc-btn esc-btn-approve"
-              onClick={() => resolve('approved')}
+              onClick={(e) => resolve('approved', e)}
               disabled={busy !== null}
             >
               {busy === 'approved' ? 'Approving…' : 'Approve'}
@@ -126,15 +128,17 @@ function EscalationCard({ case_, actor, onResolved, onError }) {
           disabled={busy !== null}
         />
         <button
+          type="button"
           className="esc-btn esc-btn-reject"
-          onClick={() => resolve('rejected')}
+          onClick={(e) => resolve('rejected', e)}
           disabled={busy !== null}
         >
           {busy === 'rejected' ? 'Recording…' : 'Reject'}
         </button>
         <button
+          type="button"
           className="esc-btn esc-btn-defer"
-          onClick={() => resolve('deferred')}
+          onClick={(e) => resolve('deferred', e)}
           disabled={busy !== null}
         >
           {busy === 'deferred' ? 'Recording…' : 'Defer'}
