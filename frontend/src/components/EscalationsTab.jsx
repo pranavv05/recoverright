@@ -83,6 +83,7 @@ function EscalationCard({ case_, actor, onResolved, onError }) {
       </div>
 
       <div className="esc-card-actions">
+        <div className="esc-card-reviewer">Reviewing as: {actor.trim() || '—'}</div>
         {canApprove ? (
           <>
             <select
@@ -144,7 +145,7 @@ function EscalationCard({ case_, actor, onResolved, onError }) {
 }
 
 export default function EscalationsTab({ escalations, loading, onResolved }) {
-  const [actor, setActor] = useState('')
+  const [actor, setActor] = useState('Priya (Finance Lead)')
   const [error, setError] = useState(null)
 
   if (loading) {
@@ -176,19 +177,20 @@ export default function EscalationsTab({ escalations, loading, onResolved }) {
           <strong>{sorted.length}</strong> awaiting review ·{' '}
           <strong>{rupees(underReview)}</strong> outstanding
         </div>
-        <label className="esc-actor">
-          Reviewing as
-          <input
-            type="text"
-            placeholder="you@company.com"
-            aria-label="Reviewer name or email"
-            value={actor}
-            onChange={(e) => setActor(e.target.value)}
-          />
-        </label>
+        <div className="esc-actor-group">
+          <label className="esc-actor">
+            Reviewing as
+            <input
+              type="text"
+              placeholder="you@company.com"
+              aria-label="Reviewer name or email"
+              value={actor}
+              onChange={(e) => setActor(e.target.value)}
+            />
+          </label>
+          {error && <div className="esc-error">{error}</div>}
+        </div>
       </div>
-
-      {error && <div className="esc-error">{error}</div>}
 
       <div className="esc-list">
         {sorted.map((case_) => (

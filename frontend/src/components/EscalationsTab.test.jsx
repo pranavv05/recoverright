@@ -35,7 +35,9 @@ function cardFor(invoiceId) {
 }
 
 async function signIn(user, who = 'finance@example.com') {
-  await user.type(screen.getByLabelText('Reviewer name or email'), who)
+  const input = screen.getByLabelText('Reviewer name or email')
+  await user.clear(input)
+  await user.type(input, who)
 }
 
 describe('EscalationsTab — the queue', () => {
@@ -48,6 +50,17 @@ describe('EscalationsTab — the queue', () => {
     // An empty table reads as broken; an empty state reads as done.
     renderTab({ escalations: [] })
     expect(screen.getByText(/Nothing awaiting review/)).toBeInTheDocument()
+  })
+
+  it('pre-fills the reviewer field so a decision can be recorded immediately', () => {
+    renderTab()
+    expect(screen.getByLabelText('Reviewer name or email')).toHaveValue('Priya (Finance Lead)')
+  })
+
+  it('shows who is reviewing above each card\'s actions', () => {
+    renderTab()
+    const card = cardFor('INV-1077')
+    expect(within(card).getByText('Reviewing as: Priya (Finance Lead)')).toBeInTheDocument()
   })
 
   it('renders one card per open escalation', () => {
@@ -202,6 +215,7 @@ describe('EscalationsTab — resolving', () => {
     // this too, but failing here saves a round trip and says so plainly.
     const user = userEvent.setup()
     renderTab()
+    await user.clear(screen.getByLabelText('Reviewer name or email'))
     await user.click(within(cardFor('INV-1077')).getByRole('button', { name: 'Approve' }))
 
     expect(await screen.findByText(/Enter your name or email/)).toBeInTheDocument()
