@@ -1033,7 +1033,7 @@ recoverright/
                              # WhyNot, ReasoningChain, ClientHealthTab,
                              # EscalationsTab, AnalyticsTab, CsvUpload,
                              # RazorpaySync, Counter
-    src/**/*.test.{js,jsx}   # 238 Vitest + React Testing Library tests,
+    src/**/*.test.{js,jsx}   # 244 Vitest + React Testing Library tests,
                              # ~99% statement coverage (thresholds enforced
                              # in vite.config.js). See frontend/README.md
     src/test/fixtures.js     # Payloads shaped like the real API responses
