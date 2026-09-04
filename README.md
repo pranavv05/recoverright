@@ -29,8 +29,20 @@ python -m api.main                    # batch over 52 invoices, simulated
 uvicorn api.main:app --port 8000      # then: cd frontend && npm i && npm run dev
 ```
 
-**Headline results** — three runs against a 41-invoice held-out set
-([full table](#evaluation-results)):
+**Headline results below are stale.** They were measured against
+`meta/llama-3.1-8b-instruct`, which reached end-of-life on NVIDIA NIM on
+2026-08-26 and now returns HTTP 410 for every call — see § Tech Stack for the
+replacement model (`meta/llama-3.2-11b-vision-instruct`). A single fresh run
+against the new model (`python -m evaluation.run --dataset data/held_out.json`,
+2026-09-04) gave `cause_accuracy: 0.537`, `evidence_tier_accuracy: 0.463`,
+`action_accuracy: 0.488`, `correct_block_rate: 1.0`,
+`correct_escalation_rate: 0.963`, `inappropriate_action_count: 1` (INV-1066 —
+one of the four documented no-`client_notes` invoices under § Limitations;
+the action taken was `wait`, non-contacting and reversible, not a customer
+contact), `over_escalation_count: 5`. That is one run, not the three-run mean
+this methodology calls for — rerun with `--repeat 3` before quoting numbers
+publicly. The table and narrative below describe the retired model's
+behavior and are kept for the record; do not read them as current.
 
 | | |
 |---|---|
@@ -234,7 +246,7 @@ application code.
 | Backend / orchestration | Python — concurrent `asyncio` batch pipeline plus a FastAPI read API for the dashboard |
 | Agent loop | Hand-rolled orchestrator + five specialised execution workers, deterministic routing (readable over clever) |
 | Reasoning | Two-call ReAct — signal extraction, then a visible Thought 1..5 chain |
-| LLM | NVIDIA NIM (`meta/llama-3.1-8b-instruct`), structured JSON output |
+| LLM | NVIDIA NIM (`meta/llama-3.2-11b-vision-instruct`), structured JSON output |
 | Database | PostgreSQL (Docker) — sync connections plus an async pool for the batch |
 | Payments | Razorpay test-mode Payment Links + Invoices APIs |
 | Frontend | React + Vite dashboard — Invoices, Client Health, Analytics |
@@ -1054,6 +1066,11 @@ recoverright/
 ---
 
 ## Evaluation Results
+
+> **Stale — measured against the retired `meta/llama-3.1-8b-instruct`.** See
+> the note under § Headline Results for a single fresh run against the
+> current model and the reason a full three-run replacement isn't in this
+> table yet.
 
 Three independent runs of
 `python -m evaluation.run --dataset data/held_out.json`, re-run after the

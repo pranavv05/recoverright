@@ -240,15 +240,12 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
             blocked_actions=["all_automated_actions"],
         )
 
-    if inp.hard_stop:
-        return PolicyDecision(
-            invoice_id=inp.invoice_id,
-            decision="BLOCK",
-            reasons=["hard_stop_flag_set_on_invoice"],
-            allowed_actions=["flag_for_human_review"],
-            blocked_actions=["all_automated_actions"],
-        )
-
+    # Checked before the generic hard_stop flag below: every legal_threat
+    # invoice in the corpus also carries hard_stop=True, so if the generic
+    # check ran first it would always win and "legal_threat_detected_in_
+    # client_notes" / block_type "legal" could never actually fire — the
+    # audit trail would call every legal threat a generic "data_error"
+    # instead of naming the guardrail that actually caught it.
     legal_hit = detect_legal(notes)
     if legal_hit:
         return PolicyDecision(
@@ -259,6 +256,15 @@ def evaluate(inp: PolicyInput) -> PolicyDecision:
                 f"matched_phrase:{legal_hit[:80]}",
             ],
             allowed_actions=["flag_for_legal_escalation"],
+            blocked_actions=["all_automated_actions"],
+        )
+
+    if inp.hard_stop:
+        return PolicyDecision(
+            invoice_id=inp.invoice_id,
+            decision="BLOCK",
+            reasons=["hard_stop_flag_set_on_invoice"],
+            allowed_actions=["flag_for_human_review"],
             blocked_actions=["all_automated_actions"],
         )
 

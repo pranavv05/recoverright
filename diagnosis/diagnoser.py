@@ -58,13 +58,35 @@ NVIDIA_BASE_URL = os.getenv(
 # tier at the time of integration; meta/llama-3.1-8b-instruct responded
 # reliably and fast in repeated live checks. That model reached end-of-life
 # on NVIDIA NIM on 2026-08-26 (confirmed via a live 410 Gone from the API and
-# absence from the current /v1/models catalog) and meta/llama-3.2-11b-vision-
-# instruct is its replacement — the closest same-family, same-account-
-# accessible instruct model, confirmed to support response_format=json_object
-# cleanly.
+# absence from the current /v1/models catalog). Two replacements were
+# verified live against this account: openai/gpt-oss-20b (a reasoning model
+# — correct output, but ~40-60s per call since it spends tokens on hidden
+# chain-of-thought before the visible answer) and
+# meta/llama-3.2-11b-vision-instruct (not a reasoning model — same JSON
+# quality, ~10-15s per call, confirmed to support response_format=
+# json_object cleanly). The demo scripts have a hard on-camera time budget
+# (<60s / <30s), so the non-reasoning model is the default; gpt-oss-20b
+# remains a drop-in alternative via NVIDIA_MODEL for anyone who prefers it
+# and has time to spare.
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct")
 MAX_RETRIES = _env_int("NVIDIA_MAX_RETRIES", 6)
-REQUEST_TIMEOUT_SECONDS = _env_float("NVIDIA_REQUEST_TIMEOUT_SECONDS", 30.0)
+# gpt-oss-20b is a reasoning model — it spends completion tokens on hidden
+# chain-of-thought before the visible answer, and a real invoice prompt was
+# measured taking 30-60s to finish. 30s was tuned for meta/llama-3.1-8b-
+# instruct, a non-reasoning model that answered in a few seconds.
+REQUEST_TIMEOUT_SECONDS = _env_float("NVIDIA_REQUEST_TIMEOUT_SECONDS", 90.0)
+
+# gpt-oss models accept a reasoning_effort hint (low/medium/high) via
+# chat_template_kwargs; "low" cuts the hidden reasoning short enough that a
+# realistic prompt still leaves room for the visible answer inside max_tokens.
+# Harmless to omit for a non-gpt-oss model, so this only fires for one.
+_IS_REASONING_MODEL = "gpt-oss" in NVIDIA_MODEL
+
+
+def _reasoning_extra_body() -> dict:
+    if _IS_REASONING_MODEL:
+        return {"chat_template_kwargs": {"reasoning_effort": "low"}}
+    return {}
 
 # Stagger between the two ReAct calls for a single invoice, so a burst of
 # invoices being diagnosed concurrently doesn't double the request rate at
@@ -515,6 +537,7 @@ def _call_nvidia(
                 temperature=0.1,
                 max_tokens=max_tokens,
                 timeout=REQUEST_TIMEOUT_SECONDS,
+                extra_body=_reasoning_extra_body(),
             )
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
@@ -594,7 +617,7 @@ def _extract_signals(invoice: dict, api_key: str) -> dict:
         client, invoice_id,
         system_prompt=SIGNAL_EXTRACTION_SYSTEM_PROMPT,
         user_message=user_message,
-        max_tokens=700,
+        max_tokens=2000,
         json_mode=True,
         call_label="signal extraction",
         parse_fn=_extract_json,
@@ -622,7 +645,7 @@ def _reason_with_react(invoice: dict, signals: dict, api_key: str) -> str:
         client, invoice_id,
         system_prompt=REACT_SYSTEM_PROMPT,
         user_message=user_message,
-        max_tokens=1500,
+        max_tokens=3000,
         json_mode=False,
         call_label="ReAct reasoning",
     )
@@ -899,6 +922,7 @@ async def _call_nvidia_async(
                 temperature=0.1,
                 max_tokens=max_tokens,
                 timeout=REQUEST_TIMEOUT_SECONDS,
+                extra_body=_reasoning_extra_body(),
             )
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
@@ -996,7 +1020,7 @@ async def _extract_signals_async(invoice: dict, api_key: str) -> dict:
         client, invoice_id,
         system_prompt=SIGNAL_EXTRACTION_SYSTEM_PROMPT,
         user_message=user_message,
-        max_tokens=700,
+        max_tokens=2000,
         json_mode=True,
         call_label="signal extraction",
         parse_fn=_extract_json,
@@ -1024,7 +1048,7 @@ async def _reason_with_react_async(invoice: dict, signals: dict, api_key: str) -
         client, invoice_id,
         system_prompt=REACT_SYSTEM_PROMPT,
         user_message=user_message,
-        max_tokens=1500,
+        max_tokens=3000,
         json_mode=False,
         call_label="ReAct reasoning",
     )
