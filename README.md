@@ -15,7 +15,7 @@ is never chased, a legal threat never gets an automated reply, and a ₹50L
 strategic account never gets collected on without a human. Every decision,
 including every refusal, is on the audit trail.
 
-**Demo video:** _(link pending — add before submitting)_
+**Demo video:** : https://www.youtube.com/watch?v=s-3B0S9CR_w
 
 **60-second run** (no Razorpay account, no payments, no LLM spend):
 
