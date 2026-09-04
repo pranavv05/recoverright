@@ -55,15 +55,18 @@ describe('DiagnosisCell', () => {
     expect(screen.getByText('Client states the link expired')).toBeInTheDocument()
   })
 
-  it('says the diagnosis failed rather than showing an empty cause', () => {
-    render(<DiagnosisCell invoice={failedDiagnosisInvoice} />)
-    expect(screen.getByText('diagnosis failed')).toBeInTheDocument()
+  it('shows a warning state rather than an empty cause when diagnosis failed', () => {
+    const { container } = render(<DiagnosisCell invoice={failedDiagnosisInvoice} />)
+    expect(screen.getByText(/Diagnosis failed — routed to human review/)).toBeInTheDocument()
+    expect(container.querySelector('.diagnosis-failed-warning')).toBeInTheDocument()
   })
 
   it('distinguishes "not diagnosed yet" from "diagnosis failed"', () => {
-    render(<DiagnosisCell invoice={{ ...allowedInvoice, diagnosis: null, diagnosis_failed: false }} />)
+    const { container } = render(
+      <DiagnosisCell invoice={{ ...allowedInvoice, diagnosis: null, diagnosis_failed: false }} />
+    )
     expect(screen.getByText('—')).toBeInTheDocument()
-    expect(screen.queryByText('diagnosis failed')).toBeNull()
+    expect(container.querySelector('.diagnosis-failed-warning')).toBeNull()
   })
 
   it('omits the evidence line when the model cited nothing', () => {

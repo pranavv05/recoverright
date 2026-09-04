@@ -22,7 +22,13 @@ export function EvidenceCell({ invoice }) {
 
 export function DiagnosisCell({ invoice }) {
   if (invoice.diagnosis_failed) {
-    return <div className="cell-stacked"><span className="cell-main">diagnosis failed</span></div>
+    return (
+      <div className="cell-stacked">
+        <span className="diagnosis-failed-warning">
+          ⚠ Diagnosis failed — routed to human review
+        </span>
+      </div>
+    )
   }
   if (!invoice.diagnosis) {
     return <div className="cell-stacked"><span className="cell-main">—</span></div>

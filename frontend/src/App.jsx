@@ -136,6 +136,10 @@ export default function App() {
 
       {error && <div className="error-banner">Failed to reach API: {error}</div>}
 
+      {!metrics && !error && (
+        <div className="loading counters-loading">Loading dashboard…</div>
+      )}
+
       {metrics && (
         <div className="counters-row">
           <Counter
