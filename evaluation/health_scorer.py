@@ -129,6 +129,16 @@ def _was_formerly_reliable(history: list) -> bool:
     return on_time > len(previous) / 2
 
 
+def _reliable_months_before_deterioration(history: list) -> int:
+    """Months of history preceding the most recent trend window.
+
+    compute_payment_trend() judges deterioration from the most recent
+    MONTHS_FOR_TREND entries; everything before that window is the track
+    record the capital flag's "was reliable" claim is actually describing.
+    """
+    return max(len(history) - MONTHS_FOR_TREND, 0)
+
+
 def _rupees(paise: int) -> str:
     """Formats integer paise as a comma-grouped rupee figure for pattern text."""
     return f"{paise // 100:,}"
@@ -166,12 +176,13 @@ def _assign_tier(
 
 
 def _describe_pattern(
-    *, tier, trigger, capital_flag, promise_broken_count, deliberate_stall_count,
-    total_outstanding_paise, days_overdue_avg, dominant_cause,
+    *, client_name, invoice_count, tier, trigger, capital_flag, promise_broken_count,
+    deliberate_stall_count, total_outstanding_paise, days_overdue_avg, dominant_cause,
 ):
     """Deterministic, template-based pattern description. No LLM involved."""
     outstanding = _rupees(total_outstanding_paise)
     stall_count = promise_broken_count + deliberate_stall_count
+    invoice_word = "invoice" if invoice_count == 1 else "invoices"
 
     if tier == "critical":
         if trigger == "broken_commitments":
@@ -222,11 +233,16 @@ def _describe_pattern(
         )
 
     if dominant_cause in ("payment_link_failure", "wrong_contact"):
+        be = "is" if invoice_count == 1 else "are"
         return (
-            "Client is a reliable payer. Current overdue invoice is technical "
-            "or administrative, not behavioral."
+            f"{client_name} is a reliable payer. Current overdue {invoice_word} "
+            f"(₹{outstanding} outstanding) {be} technical or administrative, not "
+            f"behavioral — diagnosed as {dominant_cause.replace('_', ' ')}."
         )
-    return "Client is a reliable payer with no significant risk signals in this batch."
+    return (
+        f"{client_name} is a reliable payer with no significant risk signals "
+        f"in this batch — {invoice_count} {invoice_word}, ₹{outstanding} outstanding."
+    )
 
 
 def score_client(client_name: str, invoices: list) -> dict:
@@ -275,14 +291,21 @@ def score_client(client_name: str, invoices: list) -> dict:
         and payment_trend == "deteriorating"
         and _was_formerly_reliable(history)
     )
-    capital_flag_reason = (
-        f"Client's cash flow appears constrained rather than unwilling to pay — "
-        f"payment history was reliable and has recently deteriorated, with no "
-        f"active disputes or legal threats on file. {CAPITAL_FLAG_REASON_SUFFIX}"
-        if capital_flag else None
-    )
+    capital_flag_reason = None
+    if capital_flag:
+        reliable_months = _reliable_months_before_deterioration(history)
+        invoice_word = "invoice" if invoice_count == 1 else "invoices"
+        capital_flag_reason = (
+            f"{client_name} has {invoice_count} overdue {invoice_word} "
+            f"(₹{_rupees(total_outstanding_paise)}). Payment history shows "
+            f"{reliable_months} months of on-time payments followed by recent "
+            f"deterioration. No disputes or legal threats on record. Cash flow "
+            f"constraint rather than unwillingness to pay. {CAPITAL_FLAG_REASON_SUFFIX}"
+        )
 
     pattern_description = _describe_pattern(
+        client_name=client_name,
+        invoice_count=invoice_count,
         tier=tier,
         trigger=trigger,
         capital_flag=capital_flag,
