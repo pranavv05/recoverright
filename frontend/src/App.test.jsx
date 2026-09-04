@@ -427,6 +427,32 @@ describe('App — escalation queue', () => {
       )
     )
   })
+
+  it('does not collapse the queue to a loading placeholder while that refetch is in flight', async () => {
+    // Regression test: this refetch used to flip the same loading flag the
+    // initial mount uses, which unmounted every card down to "Loading
+    // escalations…" and back — a flash that reads as the page reloading and
+    // scrolling to the top mid-review. The queue should stay on screen with
+    // the resolved card's data throughout.
+    await renderApp()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /^Escalations/ }))
+    await user.type(screen.getByLabelText('Reviewer name or email'), 'cfo@example.com')
+
+    const releases = []
+    vi.spyOn(api, 'get').mockImplementation((url) => new Promise((resolve) => {
+      releases.push(() => resolve({ data: apiResponses()[url] ?? [] }))
+    }))
+    vi.spyOn(api, 'post').mockResolvedValue({ data: { resolution: 'rejected' } })
+
+    await user.click(screen.getAllByRole('button', { name: 'Reject' })[0])
+
+    await waitFor(() => expect(releases.length).toBe(DASHBOARD_ENDPOINTS.length))
+    expect(screen.queryByText('Loading escalations…')).not.toBeInTheDocument()
+    expect(screen.getByText('INV-1077')).toBeInTheDocument()
+
+    releases.forEach((release) => release())
+  })
 })
 
 describe('App — data source panels', () => {

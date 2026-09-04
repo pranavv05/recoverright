@@ -35,11 +35,19 @@ export default function App() {
   // One round trip for the whole dashboard. The five endpoints are read-only
   // and independent, so they go out together — a serial chain would make the
   // post-batch refresh five times as slow for no ordering benefit.
-  const fetchAll = useCallback(async () => {
-    setLoading(true)
-    setHealthLoading(true)
-    setAnalyticsLoading(true)
-    setEscalationsLoading(true)
+  //
+  // `silent` skips the loading flags. Resolving a single escalation calls
+  // this to pick up the now-shorter escalations list, and flipping the
+  // loading flags there would collapse the whole tab down to a "Loading…"
+  // placeholder and back — a visible flash that (with the list's height
+  // changing under it) reads as the page jumping to the top mid-review.
+  const fetchAll = useCallback(async ({ silent } = {}) => {
+    if (!silent) {
+      setLoading(true)
+      setHealthLoading(true)
+      setAnalyticsLoading(true)
+      setEscalationsLoading(true)
+    }
     setError(null)
     try {
       const [invRes, metRes, healthRes, analyticsRes, escRes] = await Promise.all([
@@ -57,12 +65,16 @@ export default function App() {
     } catch (e) {
       setError(e.message)
     } finally {
-      setLoading(false)
-      setHealthLoading(false)
-      setAnalyticsLoading(false)
-      setEscalationsLoading(false)
+      if (!silent) {
+        setLoading(false)
+        setHealthLoading(false)
+        setAnalyticsLoading(false)
+        setEscalationsLoading(false)
+      }
     }
   }, [])
+
+  const onEscalationResolved = useCallback(() => fetchAll({ silent: true }), [fetchAll])
 
   // fetchAll() opens by setting the four loading flags to true. On this mount
   // that is a no-op: all four already initialise to true, and React bails out
@@ -220,7 +232,7 @@ export default function App() {
         <EscalationsTab
           escalations={escalations}
           loading={escalationsLoading}
-          onResolved={fetchAll}
+          onResolved={onEscalationResolved}
         />
       ) : (
         <AnalyticsTab
