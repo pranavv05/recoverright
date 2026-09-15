@@ -4,8 +4,6 @@
 
 > "RecoverRight identifies why an overdue invoice is unpaid, recommends the least-risky recovery action, and executes it only when a deterministic policy engine permits it."
 
-Built for the **Razorpay AI Buildathon — Track 03: AI Revenue Recovery**
-
 ---
 
 **What it is.** An autonomous agent for overdue B2B invoices. It diagnoses *why*
